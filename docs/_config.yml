@@ -21,7 +21,7 @@ title                    : "TFG Yuriy Moreno"
 title_separator          : "-"
 subtitle                 : # site tagline that appears below site title in masthead
 name                     : "Yuriy Alejandro Moreno Salomón"
-description              : "An amazing website."
+description              : "Mi pagina web."
 url                      : "https://roboticslaburjc.github.io" # the base hostname & protocol for your site e.g. "https://mmistakes.github.io"
 baseurl                  : "/2024-tfg-yuriy-moreno" # the subpath of your site, e.g. "/blog"
 repository               : "RoboticsLabURJC/2024-tfg-yuriy-moreno" # GitHub username/repo-name e.g. "mmistakes/minimal-mistakes"
