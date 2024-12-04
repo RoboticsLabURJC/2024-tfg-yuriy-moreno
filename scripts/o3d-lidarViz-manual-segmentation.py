@@ -8,6 +8,9 @@ from matplotlib import colormaps as cm
 import sys
 import signal
 import pygame
+import os
+import cv2
+
 
 VIRIDIS = np.array(cm.get_cmap('inferno').colors)
 VID_RANGE = np.linspace(0.0, 1.0, VIRIDIS.shape[0])
@@ -16,7 +19,7 @@ VID_RANGE = np.linspace(0.0, 1.0, VIRIDIS.shape[0])
 actor_list = []
 manual_mode = False
 
-def lidar_callback(lidar_data, point_cloud):
+def lidar_callback(lidar_data, point_cloud, frame):
     data = np.copy(np.frombuffer(lidar_data.raw_data, dtype=np.dtype('f4')))
     data = np.reshape(data, (int(data.shape[0] / 4), 4))
 
@@ -32,6 +35,19 @@ def lidar_callback(lidar_data, point_cloud):
     point_cloud.points = o3d.utility.Vector3dVector(data[:, :-1])
     point_cloud.colors = o3d.utility.Vector3dVector(int_color)
 
+    output_dir = 'dataset/lidar'
+
+    # Crear la carpeta de salida si no existeww
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Guardar el point cloud cada ciertos frames (por ejemplo, cada 10 frames)
+    if frame % 20 == 0:
+        # Crear el nombre de archivo con un timestamp o el número de frame
+        filename = os.path.join(output_dir, f"lidar_points_{frame:04d}.ply")
+        print(f"Guardando archivo {filename}...")
+        o3d.io.write_point_cloud(filename, point_cloud)
+
 def spawn_vehicle_lidar_camera_segmentation(world, bp, traffic_manager, delta):
     vehicle_bp = bp.filter('vehicle.*')[0]
     spawn_points = world.get_map().get_spawn_points()
@@ -40,7 +56,7 @@ def spawn_vehicle_lidar_camera_segmentation(world, bp, traffic_manager, delta):
 
     # Configuración de sensor LiDAR
     lidar_bp = bp.find('sensor.lidar.ray_cast')
-    lidar_bp.set_attribute('range', '100')
+    lidar_bp.set_attribute('range', '500')
     lidar_bp.set_attribute('rotation_frequency', str(1 / delta))
     lidar_bp.set_attribute('channels', '64')
     lidar_bp.set_attribute('points_per_second', '500000')
@@ -82,10 +98,26 @@ def set_camera_view(viz, third_person):
         ctr.set_lookat([0, 0, 0])  
         ctr.set_up([-1, 0, 0])
 
-def camera_callback(image, display_surface):
+def camera_callback(image, display_surface, frame):
+    output_dir = 'dataset/rgb'
+    # Crear el directorio si no existe
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Convertir la imagen al formato numpy
     array = np.frombuffer(image.raw_data, dtype=np.uint8)
     array = np.reshape(array, (image.height, image.width, 4))
     array = array[:, :, :3]  # Quitar el canal alfa
+
+    # Guardar la imagen como PNG
+    if frame % 20 == 0:
+        filename = os.path.join(output_dir, f"rgb_{frame:04d}.png")
+        print(f"Guardando imagen RGB en {filename}")
+        image_to_save = array[:, :, ::-1]  # Convertir de BGRA a RGB
+        cv2.imwrite(filename, image_to_save)
+
+
+
     array = array[:, :, ::-1]  # Convertir de BGRA a RGB
     surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
     display_surface.blit(surface, (0, 0))
@@ -93,7 +125,12 @@ def camera_callback(image, display_surface):
     #pygame.display.update(display_surface.get_rect())
 
 ###################################Problema
-def segmentation_callback(image, display_surface):
+def segmentation_callback(image, display_surface, frame):
+    output_dir = 'dataset/segmentation'
+    # Crear el directorio si no existe
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
     # Convertir la imagen de segmentación directamente usando CityScapesPalette
     image.convert(carla.ColorConverter.CityScapesPalette)
     
@@ -104,6 +141,12 @@ def segmentation_callback(image, display_surface):
     # Extraer los canales RGB y convertir de BGRA a RGB
     seg_array = array[:, :, :3]
     seg_array = seg_array[:, :, ::-1]
+
+    # Guardar la imagen como PNG
+    if frame % 20 == 0:
+        filename = os.path.join(output_dir, f"segmentation_{frame:04d}.png")
+        print(f"Guardando imagen de segmentación en {filename}")
+        cv2.imwrite(filename, seg_array)
 
     # Crear la superficie de Pygame y mostrarla en la sección inferior de la pantalla
     surface = pygame.surfarray.make_surface(seg_array.swapaxes(0, 1))
@@ -133,7 +176,8 @@ LABELS = {
     13: ("Carril-bici", (0, 0, 230)),
     14: ("Coche", (0, 0, 142)),
     15: ("Motocicleta", (0, 0, 70)),
-    16: ("Bicicleta", (119, 11, 32))
+    16: ("Bicicleta", (119, 11, 32)),
+    17: ("Tierra", (81, 0, 81))
 }
 
 def display_labels(display_surface):
@@ -204,7 +248,7 @@ def main():
     traffic_manager.set_global_distance_to_leading_vehicle(2.5)
 
     settings = world.get_settings()
-    delta = 0.05
+    delta = 0.03
     settings.fixed_delta_seconds = delta
     settings.synchronous_mode = True
     world.apply_settings(settings)
@@ -217,13 +261,15 @@ def main():
     actor_list.append(segmentation_camera)
 
     # Llamada al callback de cámara RGB
-    camera.listen(lambda image: camera_callback(image, rgb_surface))
+    camera.listen(lambda image: camera_callback(image, rgb_surface, frame))
 
     # Llamada al callback de segmentación
-    segmentation_camera.listen(lambda image: segmentation_callback(image, segmentation_surface))
+    segmentation_camera.listen(lambda image: segmentation_callback(image, segmentation_surface, frame))
 
     point_cloud = o3d.geometry.PointCloud()
-    lidar.listen(lambda data: lidar_callback(data, point_cloud))
+
+    frame = 0 # Contador de frames
+    lidar.listen(lambda data: lidar_callback(data, point_cloud, frame))
 
     # Utilizar VisualizerWithKeyCallback
     viz = o3d.visualization.VisualizerWithKeyCallback()
@@ -249,7 +295,7 @@ def main():
     viz.register_key_callback(ord("V"), toggle_camera_view)
 
     dt0 = datetime.now()
-    frame = 0
+
 
     while True:
 
