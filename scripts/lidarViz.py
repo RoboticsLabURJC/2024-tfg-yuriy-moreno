@@ -19,9 +19,15 @@ VID_RANGE = np.linspace(0.0, 1.0, VIRIDIS.shape[0])
 actor_list = []
 manual_mode = False
 
+# Crear un contenedor para los puntos combinados
+combined_point_cloud = o3d.geometry.PointCloud()
+
 def lidar_callback(lidar_data, point_cloud, frame):
     data = np.copy(np.frombuffer(lidar_data.raw_data, dtype=np.dtype('f4')))
     data = np.reshape(data, (int(data.shape[0] / 4), 4))
+    
+    #labels = data[:, -1].astype(int)  # Etiquetas semánticas
+    #colors = np.array([LABELS[label][1] if label in LABELS else (255, 255, 255) for label in labels]) / 255.0  # Normalizar RGB a [0, 1]
 
     # Reflejar los datos en el eje X
     data[:, 0] = -data[:, 0]
@@ -34,7 +40,7 @@ def lidar_callback(lidar_data, point_cloud, frame):
 
     point_cloud.points = o3d.utility.Vector3dVector(data[:, :-1])
     point_cloud.colors = o3d.utility.Vector3dVector(int_color)
-
+    #point_cloud.colors = o3d.utility.Vector3dVector(colors)
     output_dir = 'dataset/lidar'
 
     # Crear la carpeta de salida si no existeww
@@ -48,47 +54,58 @@ def lidar_callback(lidar_data, point_cloud, frame):
         print(f"Guardando archivo {filename}...")
         o3d.io.write_point_cloud(filename, point_cloud)
 
-def spawn_vehicle_lidar_camera_segmentation(world, bp, traffic_manager, delta):
-    vehicle_bp = bp.filter('vehicle.*')[0]
-    spawn_points = world.get_map().get_spawn_points()
-    spawn_point = random.choice(spawn_points)
-    vehicle = world.spawn_actor(vehicle_bp, spawn_point)
+def spawn_lidar_camera_segmentation(world, bp, delta):
+    # Configuración base
+    #lidar_bp.set_attribute('channels', '32')  # Canales típicos para sensores básicos (32 o 64 son comunes).
+    #lidar_bp.set_attribute('range', '100')  # Rango en metros, útil para capturar suficiente entorno.
+    #lidar_bp.set_attribute('points_per_second', '500000')  # Moderado, más alto mejora detalle pero requiere más recursos.
+    #lidar_bp.set_attribute('rotation_frequency', 'str(1 / delta)')  # Frecuencia de rotación en Hz, valores típicos entre 10-20. con este uso 33
+    #lidar_bp.set_attribute('upper_fov', '10')  # Campo de visión superior, enfocado pero suficiente.
+    #lidar_bp.set_attribute('lower_fov', '-30')  # Campo de visión inferior, amplio para objetos bajos.
+    #lidar_bp.set_attribute('noise_stddev', '0.05')  # Nivel de ruido moderado para simular datos reales.
 
     # Configuración de sensor LiDAR
     lidar_bp = bp.find('sensor.lidar.ray_cast')
-    #lidar_bp.set_attribute('range', '500')
-    #lidar_bp.set_attribute('rotation_frequency', str(1 / delta))
-    #lidar_bp.set_attribute('channels', '64')
-    #lidar_bp.set_attribute('points_per_second', '500000')
     lidar_bp.set_attribute('channels', '64')
-    lidar_bp.set_attribute('range', '120')
-    lidar_bp.set_attribute('points_per_second', '1300000')
-    lidar_bp.set_attribute('rotation_frequency', '35') #str(1 / delta)
+    lidar_bp.set_attribute('range', '100')
+    lidar_bp.set_attribute('points_per_second', '1000000')
+    lidar_bp.set_attribute('rotation_frequency', str(1 / delta)) #str(1 / delta)
     lidar_bp.set_attribute('upper_fov', '45')  # Incrementar el límite superior
     lidar_bp.set_attribute('lower_fov', '-45')  # Reducir el límite inferior
-    lidar_bp.set_attribute('noise_stddev', '0.05')
-    lidar_position = carla.Transform(carla.Location(x=-0.5, z=1.8))
-    lidar = world.spawn_actor(lidar_bp, lidar_position, attach_to=vehicle)
+    lidar_bp.set_attribute('noise_stddev', '0')
+    ##lidar_bp.set_attribute('semantic_segmentation', 'True')
+
+
+    lidar_position = carla.Transform(
+        carla.Location(x=0,y=-20, z=2.5) #cambiar orientacion
+        #carla.Rotation(pitch=0, yaw=90, roll=0)  # Mirar hacia la dirección deseada (90° en yaw)
+        )
+    lidar = world.spawn_actor(lidar_bp, lidar_position)
 
     # Configuración de cámara RGB
     camera_bp = bp.find('sensor.camera.rgb')
     camera_bp.set_attribute('image_size_x', '800')
     camera_bp.set_attribute('image_size_y', '600')
     camera_bp.set_attribute('fov', '90')
-    camera_transform = carla.Transform(carla.Location(x=-4.0, z=2.5))
-    camera = world.spawn_actor(camera_bp, camera_transform, attach_to=vehicle)
+    camera_transform = carla.Transform(
+        carla.Location(x=0,y=-15, z=5), 
+        carla.Rotation(pitch=0, yaw=90, roll=0)   #cambiar orientacion
+        )
+    camera = world.spawn_actor(camera_bp, camera_transform)
 
     # Configuración de cámara de segmentación semántica
     segmentation_bp = bp.find('sensor.camera.semantic_segmentation')
     segmentation_bp.set_attribute('image_size_x', '800')
     segmentation_bp.set_attribute('image_size_y', '600')
     segmentation_bp.set_attribute('fov', '90')
-    segmentation_transform = carla.Transform(carla.Location(x=1, z=1.5))
-    segmentation_camera = world.spawn_actor(segmentation_bp, segmentation_transform, attach_to=vehicle)
+    segmentation_transform = carla.Transform(
+        carla.Location(x=0,y=-15, z=5), 
+        carla.Rotation(pitch=0, yaw=90, roll=0) #cambiar orientacion
+        )
+    segmentation_camera = world.spawn_actor(segmentation_bp, segmentation_transform)
 
+    return lidar, camera, segmentation_camera
 
-    vehicle.set_autopilot(True, traffic_manager.get_port())
-    return vehicle, lidar, camera, segmentation_camera
 
 def set_camera_view(viz, third_person):
     ctr = viz.get_view_control()
@@ -204,30 +221,6 @@ def display_labels(display_surface):
         display_surface.blit(label_surface, (40, y_offset))
         y_offset += 30  # Mover hacia abajo para la siguiente etiqueta
 
-def vehicle_control(vehicle):
-    global manual_mode
-    control = carla.VehicleControl()  # Crear un control en blanco
-
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            pygame.quit()
-            cleanup()
-            sys.exit()
-
-        if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
-            manual_mode = not manual_mode
-            vehicle.set_autopilot(not manual_mode)
-            mode = "manual" if manual_mode else "automático"
-            print(f"\nCoche en modo {mode}.")
-            time.sleep(0.3)  # Evitar múltiples activaciones por pulsación rápida
-
-    # Aplicar controles si estamos en modo manual
-    keys = pygame.key.get_pressed()
-    if manual_mode:
-        control.throttle = 1.0 if keys[pygame.K_w] else 0.0
-        control.brake = 1.0 if keys[pygame.K_s] else 0.0
-        control.steer = -0.3 if keys[pygame.K_a] else 0.3 if keys[pygame.K_d] else 0.0
-        vehicle.apply_control(control)
 
 def main():
     pygame.init()
@@ -250,9 +243,6 @@ def main():
 
     world = client.get_world()
     blueprint_library = world.get_blueprint_library()
-    traffic_manager = client.get_trafficmanager(8000)
-    traffic_manager.set_synchronous_mode(True)
-    traffic_manager.set_global_distance_to_leading_vehicle(2.5)
 
     settings = world.get_settings()
     delta = 0.03
@@ -260,9 +250,19 @@ def main():
     settings.synchronous_mode = True
     world.apply_settings(settings)
 
+    #Clima
+    weather = world.get_weather()
+
+    # Ajustar el ángulo azimutal y la altura del sol
+    weather.sun_azimuth_angle = 90  # Sol en dirección este (por ejemplo)
+    weather.sun_altitude_angle = 60  # Sol alto en el cielo (ángulo positivo)
+
+    # Aplicar la configuración
+    world.set_weather(weather)
+
+
     global actor_list, third_person_view
-    vehicle, lidar, camera, segmentation_camera = spawn_vehicle_lidar_camera_segmentation(world, blueprint_library, traffic_manager, delta)
-    actor_list.append(vehicle)
+    lidar, camera, segmentation_camera = spawn_lidar_camera_segmentation(world, blueprint_library, delta)
     actor_list.append(lidar)
     actor_list.append(camera)
     actor_list.append(segmentation_camera)
@@ -310,9 +310,6 @@ def main():
         screen.blit(rgb_surface, (0, 0))                    # Poner RGB a la izquierda
         screen.blit(segmentation_surface, (width, 0))       # Poner Segmentación a la derecha
         pygame.display.flip()
-
-
-        vehicle_control(vehicle)
 
         if frame == 5 and not lidar_data_received:
             viz.add_geometry(point_cloud)
