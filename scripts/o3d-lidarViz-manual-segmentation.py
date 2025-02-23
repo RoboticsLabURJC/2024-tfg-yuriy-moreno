@@ -111,22 +111,29 @@ def camera_callback(image, display_surface, frame):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    # Convertir la imagen al formato numpy
+    # Convertir la imagen a un array numpy (formato BGRA)
     array = np.frombuffer(image.raw_data, dtype=np.uint8)
     array = np.reshape(array, (image.height, image.width, 4))
-    array = array[:, :, :3]  # Quitar el canal alfa
+
+    #array = array[:, :, :3]  # Quitar el canal alfa
+
+    # Para mostrar en Pygame (requiere RGB)
+    rgb_array = cv2.cvtColor(array, cv2.COLOR_BGRA2RGB)
 
     # Guardar la imagen como PNG
     if frame % 20 == 0:
         filename = os.path.join(output_dir, f"rgb_{frame:04d}.png")
         print(f"Guardando imagen RGB en {filename}")
-        image_to_save = array[:, :, ::-1]  # Convertir de BGRA a RGB
-        cv2.imwrite(filename, image_to_save)
+
+        # Convertir de BGRA a BGR antes de guardar
+        bgr_array = cv2.cvtColor(array, cv2.COLOR_BGRA2BGR)
+        cv2.imwrite(filename, bgr_array)  # OpenCV espera BGR
 
 
 
-    array = array[:, :, ::-1]  # Convertir de BGRA a RGB
-    surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
+    # Convertir de BGR a RGB para Pygame y mostrar en pantalla
+    #array = cv2.cvtColor(array, cv2.COLOR_BGRA2RGB)  
+    surface = pygame.surfarray.make_surface(rgb_array.swapaxes(0, 1))
     display_surface.blit(surface, (0, 0))
     # Actualizar solo esta superficie en vez de toda la pantalla
     #pygame.display.update(display_surface.get_rect())
