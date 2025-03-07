@@ -66,13 +66,13 @@ def spawn_lidar_camera_segmentation(world, bp, delta):
 
     # Configuración de sensor LiDAR
     lidar_bp = bp.find('sensor.lidar.ray_cast')
-    lidar_bp.set_attribute('channels', '64')
+    lidar_bp.set_attribute('channels', '32')
     lidar_bp.set_attribute('range', '100')
-    lidar_bp.set_attribute('points_per_second', '1000000')
+    lidar_bp.set_attribute('points_per_second', '500000')
     lidar_bp.set_attribute('rotation_frequency', str(1 / delta)) #str(1 / delta)
-    lidar_bp.set_attribute('upper_fov', '45')  # Incrementar el límite superior
-    lidar_bp.set_attribute('lower_fov', '-45')  # Reducir el límite inferior
-    lidar_bp.set_attribute('noise_stddev', '0')
+    lidar_bp.set_attribute('upper_fov', '10')  # Incrementar el límite superior
+    lidar_bp.set_attribute('lower_fov', '-30')  # Reducir el límite inferior
+    lidar_bp.set_attribute('noise_stddev', '0.05')
     ##lidar_bp.set_attribute('semantic_segmentation', 'True')
 
 

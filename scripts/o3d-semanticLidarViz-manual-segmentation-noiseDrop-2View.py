@@ -58,32 +58,139 @@ SEMANTIC_COLOR_MAP = {
 def get_color_from_semantic(semantic_tag):
     return SEMANTIC_COLOR_MAP.get(semantic_tag, (255, 255, 255))  # Color blanco si no está en la lista
 
+def add_noise_to_lidar(points, std_dev):
+    """
+    Agrega ruido gaussiano a la nube de puntos LiDAR.
+    Args:
+        points: np.array (N, 3) - Coordenadas XYZ del LiDAR semántico
+        std_dev: float - Desviación estándar del ruido
+    Returns:
+        np.array (N, 3) - Nube de puntos con ruido
+    """
+    noise = np.random.normal(0, std_dev, points.shape)  # Ruido Gaussiano
+    noisy_points = points + noise
+    return noisy_points
+
+
+
+def drop_points(points, semantic_tags, intensities, drop_rate=0.45, intensity_limit=0.8, zero_intensity_drop=0.4, low_intensity_threshold=0.01 ):
+    """
+    Aplica pérdidas de puntos con la misma lógica que el LiDAR de CARLA.
+    - Primero aplica pérdida aleatoria.
+    - Luego protege puntos con intensidad alta.
+    - Luego elimina puntos con intensidad cero con probabilidad extra.
+
+    Args:
+    - points: np.array (N, 3) - Coordenadas XYZ del LiDAR (sin información adicional como colores o etiquetas).
+    - semantic_tags: np.array (N,) - Etiquetas semánticas de cada punto.
+    - intensities: np.array (N,) - Intensidades de los puntos.
+    - drop_rate: float - Probabilidad de eliminar un punto de forma aleatoria.
+    - intensity_limit: float - Umbral por encima del cual no se eliminan puntos (protección de puntos con alta intensidad).
+    - zero_intensity_drop: float - Probabilidad de eliminar puntos con intensidad cero.
+    - low_intensity_threshold: float - Umbral bajo de intensidad a partir del cual se eliminan los puntos.
+
+    Returns:
+        np.array (M, 3) - Nube de puntos con menos puntos
+        np.array (M,) - Etiquetas semánticas filtradas
+    """
+
+    num_points = points.shape[0]
+
+    # Máscara de eliminación aleatoria
+    mask_drop_random = np.random.rand(num_points) < drop_rate
+
+    # Restaurar puntos con alta intensidad (> intensity_limit)
+    mask_keep_high_intensity = intensities > intensity_limit
+    mask_drop_random[mask_keep_high_intensity] = False  # No eliminamos estos puntos
+
+    # Verificar cuántos puntos tienen intensidad muy baja
+    num_low_intensity = np.sum(intensities < low_intensity_threshold)
+    print(f"Cantidad de puntos con intensidad menor a {low_intensity_threshold}: {num_low_intensity}")
+
+    # Máscara para eliminar puntos con intensidad baja (por debajo del umbral)
+    mask_drop_low_intensity = (intensities < low_intensity_threshold) & (np.random.rand(num_points) < zero_intensity_drop)
+
+
+    # Contamos cuántos puntos con intensidad cero se eliminan
+    zero_intensity_dropped = np.sum(mask_drop_low_intensity)
+    
+    # Combinamos todas las eliminaciones
+    final_mask = ~mask_drop_random & ~mask_drop_low_intensity
+
+    return points[final_mask],semantic_tags[final_mask], zero_intensity_dropped
+
+
 # Callback para procesar los datos del sensor LiDAR
-def lidar_callback(lidar_data, point_cloud, frame):
+def lidar_callback(lidar_data, point_cloud, raw_point_cloud, frame, noise_std=0.1, attenuation_coefficient=0.1, output_dir = 'dataset/lidar'):
+    """
+    Procesa los datos del LiDAR obtenidos en cada frame.
+    - Guarda una copia de la nube de puntos original (sin modificaciones).
+    - Aplica ruido gaussiano y pérdidas de puntos.
+    - Asigna colores basados en etiquetas semánticas.
+    - Guarda la nube de puntos procesada.
+
+    Args:
+        lidar_data: carla.LidarMeasurement - Datos crudos del LiDAR.
+        point_cloud: open3d.geometry.PointCloud - Nube de puntos procesada.
+        raw_point_cloud: open3d.geometry.PointCloud - Nube de puntos original.
+        frame: int - Número de frame actual.
+        noise_std: float - Desviación estándar del ruido gaussiano aplicado.
+        attenuation_coefficient: float - Coeficiente de atenuación para calcular la intensidad
+        output_dir: Dirección de salida de la nube du puntos
+    """
+
     data = np.copy(np.frombuffer(lidar_data.raw_data, dtype=np.dtype('f4')))
     data = np.reshape(data, (int(data.shape[0] / 6), 6))  # Ahora cada fila tiene 6 valores
 
-    # Reflejar los datos en el eje X
+    # Reflejar los datos en el eje X para mantener coherencia con el sistema de coordenadas de CARLA
     data[:, 0] = -data[:, 0]
 
-    # Extraer etiquetas semánticas
-    semantic_tags = data[:, 5].view(np.uint32)  # Ver datos como enteros
+    # Extraer las coordenadas XYZ y los valores de intensidad
+    points = data[:, :3]
 
-    # Asignar colores según etiquetas
+    # Extraer etiquetas semánticas
+    semantic_tags = data[:, 5].view(np.uint32)  # Convertir los datos a enteros
+
+    # Asignar colores originales antes de procesar los puntos
+    raw_colors = np.array([get_color_from_semantic(tag) for tag in semantic_tags]) / 255.0
+
+    # Guardar la nube de puntos original (sin ruido ni pérdidas)
+    raw_point_cloud.points = o3d.utility.Vector3dVector(points)
+    raw_point_cloud.colors = o3d.utility.Vector3dVector(raw_colors)
+    
+    ######### Aplicar ruido y perdidas ############
+    # Calcular la distancia de cada punto al sensor (suponiendo que el sensor está en el origen)
+    distances = np.linalg.norm(points, axis=1)  # Distancia euclidiana
+
+    # Calcular la intensidad para cada punto utilizando la fórmula I = e^(-a * d)
+    intensities = np.exp(-attenuation_coefficient * distances)
+    
+    # Aplicar ruido a los puntos
+    points = add_noise_to_lidar(points, noise_std)
+
+    # Aplicar pérdidas de puntos según las reglas del LiDAR
+    points, semantic_tags, zero_intensity_removed = drop_points(points, semantic_tags, intensities)
+
+    # Mostrar el número de puntos eliminados con intensidad cero
+    print(f"Se eliminaron {zero_intensity_removed} puntos con intensidad cero.")
+
+    # Asignar colores según etiquetas semánticas
     colors = np.array([get_color_from_semantic(tag) for tag in semantic_tags]) / 255.0  # Normalizar a [0,1]
 
-    point_cloud.points = o3d.utility.Vector3dVector(data[:, :3])  # Nube de puntos (Nx3).
+    # Asignar los datos modificados a la nube de puntos procesada
+    point_cloud.points = o3d.utility.Vector3dVector(points)  # Nube de puntos (Nx3).
     point_cloud.colors = o3d.utility.Vector3dVector(colors) # Colores RGB normalizados (Nx3)
 
     # Guardar las etiquetas semánticas en el campo "normals"
     point_cloud.normals = o3d.utility.Vector3dVector(np.c_[semantic_tags, semantic_tags, semantic_tags])
 
-    output_dir = 'dataset/lidar'
+    
+
+    # 📂 Guardar el point cloud cada 20 frames
     # Crear la carpeta de salida si no existe
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    # Guardar el point cloud cada ciertos frames (por ejemplo, cada 20 frames)
     if frame % 20 == 0:
         filename = os.path.join(output_dir, f"lidar_points_{frame:04d}.ply")
         print(f"Guardando archivo {filename}...")
@@ -199,13 +306,7 @@ def segmentation_callback(image, display_surface, frame):
     # Llamar a la función para mostrar las etiquetas
     display_labels(display_surface)
 
-    # Mostrar valores únicos de etiquetas en la imagen
-    unique_labels = np.unique(image.raw_data)
-    print(f"Etiquetas detectadas en segmentación: {unique_labels}")
 
-    # Revisar si la etiqueta 29 aparece y forzar su color
-    if 29 in unique_labels:
-        print("¡Etiqueta Rocks detectada en segmentación!")
 
     
     # Actualizar solo el área de la pantalla donde se muestra la segmentación
@@ -321,17 +422,30 @@ def main():
     # Llamada al callback de segmentación
     segmentation_camera.listen(lambda image: segmentation_callback(image, segmentation_surface, frame))
 
-    point_cloud = o3d.geometry.PointCloud()
+    point_cloud = o3d.geometry.PointCloud()  # Nube procesada
+    raw_point_cloud = o3d.geometry.PointCloud()  # Nube original
 
     frame = 0 # Contador de frames
-    lidar.listen(lambda data: lidar_callback(data, point_cloud, frame))
+    lidar.listen(lambda data: lidar_callback(data, point_cloud, raw_point_cloud, frame))
 
     # Utilizar VisualizerWithKeyCallback
-    viz = o3d.visualization.VisualizerWithKeyCallback()
-    viz.create_window(window_name='Lidar simulado en Carla', width=960, height=540, left=480, top=270)
+ # 📌 Crear dos visualizadores SEPARADOS
+    viz_raw = o3d.visualization.Visualizer()
+    viz = o3d.visualization.Visualizer()
+    
+    viz_raw.create_window(window_name="Lidar Original", width=960, height=540, left=100, top=100)
+    viz.create_window(window_name="Lidar Procesado", width=960, height=540, left=1100, top=100)
+    
+    viz_raw.get_render_option().background_color = [0.05, 0.05, 0.05]
     viz.get_render_option().background_color = [0.05, 0.05, 0.05]
+
+    viz_raw.get_render_option().point_size = 1.35
     viz.get_render_option().point_size = 1.35
+
+    viz_raw.get_render_option().show_coordinate_frame = True
     viz.get_render_option().show_coordinate_frame = True
+
+
 
     third_person_view = True
 
@@ -342,12 +456,15 @@ def main():
     def toggle_camera_view(_):
         global third_person_view
         third_person_view = not third_person_view
+        set_camera_view(viz_raw, third_person_view)
         set_camera_view(viz, third_person_view)
         print("Cambiando a tercera persona" if third_person_view else "Cambiando a primera persona")
         return True  # Devolver True para continuar el evento de renderizado
 
     # Asignar el callback al visualizador
-    viz.register_key_callback(ord("V"), toggle_camera_view)
+    
+    #viz_raw.register_key_callback(ord("V"), toggle_camera_view)
+    #viz.register_key_callback(ord("V"), toggle_camera_view)
 
     dt0 = datetime.now()
 
@@ -361,13 +478,18 @@ def main():
         vehicle_control(vehicle)
 
         if frame == 5 and not lidar_data_received:
-            viz.add_geometry(point_cloud)
+            viz_raw.add_geometry(raw_point_cloud)  # Nube sin procesar
+            viz.add_geometry(point_cloud)  # Nube con ruido y pérdidas
             lidar_data_received = True
             print("Geometry added to the visualizer")
+            set_camera_view(viz_raw, third_person_view)
             set_camera_view(viz, third_person_view)
 
+        viz_raw.update_geometry(raw_point_cloud)
         viz.update_geometry(point_cloud)
+        viz_raw.poll_events()
         viz.poll_events()
+        viz_raw.update_renderer()
         viz.update_renderer()
         time.sleep(0.03)
         world.tick()
@@ -380,7 +502,7 @@ def main():
         dt0 = datetime.now()
         frame += 1
 
-        if not viz.poll_events():
+        if not viz.poll_events() or not viz_raw.poll_events():
             print("Exiting visualization")
             break
 
@@ -403,3 +525,4 @@ def signal_handler(sig, frame):
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     main()
+

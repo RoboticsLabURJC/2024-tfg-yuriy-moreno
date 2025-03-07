@@ -58,8 +58,33 @@ SEMANTIC_COLOR_MAP = {
 def get_color_from_semantic(semantic_tag):
     return SEMANTIC_COLOR_MAP.get(semantic_tag, (255, 255, 255))  # Color blanco si no está en la lista
 
+def add_noise_to_lidar(points, std_dev=0.05):
+    """
+    Agrega ruido gaussiano a la nube de puntos LiDAR.
+    Args:
+        points: np.array (N, 3) - Coordenadas XYZ del LiDAR semántico
+        std_dev: float - Desviación estándar del ruido
+    Returns:
+        np.array (N, 3) - Nube de puntos con ruido
+    """
+    noise = np.random.normal(0, std_dev, points.shape)  # Ruido Gaussiano
+    noisy_points = points + noise
+    return noisy_points
+
+def drop_points(points, drop_prob=0.1):
+    """
+    Simula pérdida de puntos en un LiDAR semántico.
+    Args:
+        points: np.array (N, 3) - Coordenadas XYZ del LiDAR semántico
+        drop_prob: float - Probabilidad de eliminar un punto (ej. 0.1 = 10%)
+    Returns:
+        np.array (M, 3) - Nube de puntos con menos puntos
+    """
+    mask = np.random.rand(len(points)) > drop_prob  # Mantiene puntos según probabilidad
+    return points[mask]
+
 # Callback para procesar los datos del sensor LiDAR
-def lidar_callback(lidar_data, point_cloud, frame):
+def lidar_callback(lidar_data, point_cloud, frame, noise_std=0.1, drop_prob=0.45):
     data = np.copy(np.frombuffer(lidar_data.raw_data, dtype=np.dtype('f4')))
     data = np.reshape(data, (int(data.shape[0] / 6), 6))  # Ahora cada fila tiene 6 valores
 
@@ -72,6 +97,17 @@ def lidar_callback(lidar_data, point_cloud, frame):
     # Asignar colores según etiquetas
     colors = np.array([get_color_from_semantic(tag) for tag in semantic_tags]) / 255.0  # Normalizar a [0,1]
 
+    # 1. AÑADIR RUIDO GAUSSIANO (simula errores en la medición)
+    noise = np.random.normal(0, noise_std, data[:, :3].shape)  # Ruido con media=0 y desviación estándar=0.05
+    data[:, :3] += noise
+
+    # 2. AÑADIR PÉRDIDAS ALEATORIAS (simula detección incompleta)
+    mask = np.random.rand(data.shape[0]) > drop_prob  
+    data = data[mask]
+    colors = colors[mask]
+    semantic_tags = semantic_tags[mask]
+
+    # Asignar los datos modificados a la nube de puntos
     point_cloud.points = o3d.utility.Vector3dVector(data[:, :3])  # Nube de puntos (Nx3).
     point_cloud.colors = o3d.utility.Vector3dVector(colors) # Colores RGB normalizados (Nx3)
 
@@ -79,11 +115,12 @@ def lidar_callback(lidar_data, point_cloud, frame):
     point_cloud.normals = o3d.utility.Vector3dVector(np.c_[semantic_tags, semantic_tags, semantic_tags])
 
     output_dir = 'dataset/lidar'
+
+    # 📂 Guardar el point cloud cada 20 frames
     # Crear la carpeta de salida si no existe
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    # Guardar el point cloud cada ciertos frames (por ejemplo, cada 20 frames)
     if frame % 20 == 0:
         filename = os.path.join(output_dir, f"lidar_points_{frame:04d}.ply")
         print(f"Guardando archivo {filename}...")
@@ -199,13 +236,7 @@ def segmentation_callback(image, display_surface, frame):
     # Llamar a la función para mostrar las etiquetas
     display_labels(display_surface)
 
-    # Mostrar valores únicos de etiquetas en la imagen
-    unique_labels = np.unique(image.raw_data)
-    print(f"Etiquetas detectadas en segmentación: {unique_labels}")
 
-    # Revisar si la etiqueta 29 aparece y forzar su color
-    if 29 in unique_labels:
-        print("¡Etiqueta Rocks detectada en segmentación!")
 
     
     # Actualizar solo el área de la pantalla donde se muestra la segmentación
