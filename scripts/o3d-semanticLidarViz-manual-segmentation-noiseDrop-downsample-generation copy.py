@@ -280,6 +280,7 @@ def lidar_callback(lidar_data, downsampled_point_cloud, frame, noise_std=0.1, at
         o3d.io.write_point_cloud(filename, downsampled_point_cloud)
 
 
+
 def lidar_low_callback(lidar_data, low_point_cloud, frame, noise_std=0.1, attenuation_coefficient=0.1):
     data = np.copy(np.frombuffer(lidar_data.raw_data, dtype=np.dtype('f4')))
     data = np.reshape(data, (int(data.shape[0] / 6), 6))  
@@ -333,18 +334,6 @@ def spawn_vehicle_lidar_camera_segmentation(world, bp, traffic_manager, delta):
     lidar_position = carla.Transform(carla.Location(x=-0.5, z=1.8))
     lidar = world.spawn_actor(lidar_bp, lidar_position, attach_to=vehicle)
 
-    # 📌 LiDAR CON SUBMUESTREO EN GENERACIÓN (Densidad reducida)
-    lidar_low_bp = bp.find('sensor.lidar.ray_cast_semantic')
-    lidar_low_bp.set_attribute('channels', '64')  # Menos canales
-    lidar_low_bp.set_attribute('range', '50')
-    lidar_low_bp.set_attribute('points_per_second', '500000')  # Menos puntos por segundo
-    lidar_low_bp.set_attribute('rotation_frequency', str(1 / delta))
-    lidar_low_bp.set_attribute('upper_fov', '30')
-    lidar_low_bp.set_attribute('lower_fov', '-30')
-    lidar_low_bp.set_attribute('horizontal_fov', '180')
-    lidar_low_position = carla.Transform(carla.Location(x=-0.5, z=1.8))
-    lidar_low = world.spawn_actor(lidar_low_bp, lidar_low_position, attach_to=vehicle)
-
     # Configuración de cámara RGB
     camera_bp = bp.find('sensor.camera.rgb')
     camera_bp.set_attribute('image_size_x', '800')
@@ -363,7 +352,7 @@ def spawn_vehicle_lidar_camera_segmentation(world, bp, traffic_manager, delta):
 
 
     vehicle.set_autopilot(True, traffic_manager.get_port())
-    return vehicle, lidar, lidar_low, camera, segmentation_camera
+    return vehicle, lidar, camera, segmentation_camera
 
 def set_camera_view(viz, third_person):
     ctr = viz.get_view_control()
@@ -434,7 +423,7 @@ def segmentation_callback(image, display_surface, frame):
     display_surface.blit(surface, (0, 0))
 
     # Llamar a la función para mostrar las etiquetas
-    display_labels(display_surface)
+    #display_labels(display_surface)
 
 
 
@@ -540,10 +529,9 @@ def main():
     world.apply_settings(settings)
 
     global actor_list, third_person_view
-    vehicle, lidar, lidar_low, camera, segmentation_camera = spawn_vehicle_lidar_camera_segmentation(world, blueprint_library, traffic_manager, delta)
+    vehicle, lidar, camera, segmentation_camera = spawn_vehicle_lidar_camera_segmentation(world, blueprint_library, traffic_manager, delta)
     actor_list.append(vehicle)
     actor_list.append(lidar)
-    actor_list.append(lidar_low)
     #actor_list.append(lidar_low_2)
     #actor_list.append(lidar_low_3)
     actor_list.append(camera)
@@ -558,29 +546,24 @@ def main():
     
     
     downsampled_point_cloud = o3d.geometry.PointCloud()  # Nube submuestreada
-    lidar_low_point_cloud = o3d.geometry.PointCloud()
 
 
     frame = 0 # Contador de frames
 
     lidar.listen(lambda data: lidar_callback(data, downsampled_point_cloud, frame))
-    lidar_low.listen(lambda data: lidar_low_callback(data, lidar_low_point_cloud, frame))
-
 
     # Utilizar VisualizerWithKeyCallback
  # 📌 Crear dos visualizadores SEPARADOS
     viz_downsampled = o3d.visualization.Visualizer() # Puntos después del submuestreo
-    viz_lidar_low = o3d.visualization.Visualizer()
 
     
 
     viz_downsampled.create_window(window_name="Lidar Con Submuestreo", width=960, height=540, left=1100, top=100)
-    viz_lidar_low.create_window(window_name="Lidar Con Submuestreo en generación", width=960, height=540, left=1100, top=100)
 
     
-    for viz in [viz_downsampled, viz_lidar_low]:
+    for viz in [viz_downsampled]:
         viz.get_render_option().background_color = [0.05, 0.05, 0.05]
-        viz.get_render_option().point_size = 1.35
+        viz.get_render_option().point_size = 0.7
         viz.get_render_option().show_coordinate_frame = True
 
     third_person_view = True
@@ -593,7 +576,6 @@ def main():
         global third_person_view
         third_person_view = not third_person_view
         set_camera_view(viz_downsampled, third_person_view)
-        set_camera_view(viz_lidar_low, third_person_view)
         print("Cambiando a tercera persona" if third_person_view else "Cambiando a primera persona")
         return True  # Devolver True para continuar el evento de renderizado
 
@@ -621,24 +603,20 @@ def main():
         vehicle_control(vehicle)
 
         if frame == 5 and not lidar_data_received:
-            viz_downsampled.add_geometry(downsampled_point_cloud)
-            viz_lidar_low.add_geometry(lidar_low_point_cloud) # Nube con submuestreo
+            viz_downsampled.add_geometry(downsampled_point_cloud)# Nube con submuestreo
             lidar_data_received = True
             print("Geometry added to the visualizer")
-            for viz in [viz_downsampled,viz_lidar_low]:
+            for viz in [viz_downsampled]:
                 set_camera_view(viz, third_person_view)
 
 
         viz_downsampled.update_geometry(downsampled_point_cloud)
-        viz_lidar_low.update_geometry(lidar_low_point_cloud)
 
 
         viz_downsampled.poll_events()
-        viz_lidar_low.poll_events()
 
 
         viz_downsampled.update_renderer()
-        viz_lidar_low.update_renderer()
 
         # time.sleep(0.03)
         #world.tick()
@@ -652,7 +630,7 @@ def main():
         #dt0 = datetime.now()
         frame += 1
 
-        if not viz_lidar_low.poll_events() or not viz_downsampled.poll_events():
+        if not viz_downsampled.poll_events():
             print("Exiting visualization")
             break
 

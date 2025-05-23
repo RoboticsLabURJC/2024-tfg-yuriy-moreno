@@ -121,42 +121,6 @@ def drop_points(points, semantic_tags, intensities, drop_rate=0.45, intensity_li
 
     return points[final_mask],semantic_tags[final_mask],intensities[final_mask], zero_intensity_dropped
 
-def voxel_downsampling(points, semantic_tags, intensities, voxel_size=0.5):
-    """
-    Aplica submuestreo basado en vóxeles a la nube de puntos, manteniendo etiquetas semánticas.
-
-    Args:
-        points: np.array (N, 3) - Coordenadas XYZ del LiDAR.
-        semantic_tags: np.array (N,) - Etiquetas semánticas de cada punto.
-        intensities: np.array (N,) - Intensidad de cada punto.
-        voxel_size: float - Tamaño del vóxel para el agrupamiento.
-
-    Returns:
-        np.array (M, 3) - Nube de puntos reducida mediante agrupamiento por vóxeles.
-        np.array (M,) - Etiquetas semánticas asignadas a los puntos reducidos.
-    """
-
-    print(f"Antes del submuestreo: {len(points)} puntos")
-
-    # Convertir los puntos a un objeto Open3D
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
-
-    # Aplicar el submuestreo
-    downsampled_pcd = pcd.voxel_down_sample(voxel_size)
-    downsampled_points = np.asarray(downsampled_pcd.points)
-
-    # Usar KDTree para asignar etiquetas desde los puntos originales a los reducidos
-    tree = cKDTree(points)          # Construimos el KDTree con los puntos originales
-    _, indices = tree.query(downsampled_points, k=1)  # Encontrar el vecino más cercano, Buscamos el índice en los puntos originales
-
-    # Asignar la etiqueta semántica correspondiente
-    downsampled_tags = semantic_tags[indices]
-    downsampled_intensities = intensities[indices]
-
-    print(f"Después del submuestreo: {len(downsampled_points)} puntos")
-
-    return downsampled_points, downsampled_tags, downsampled_intensities
 
 def custom_intensity(points: np.ndarray, semantic_tags: np.ndarray) -> np.ndarray:
     """
@@ -256,9 +220,6 @@ def lidar_callback(lidar_data, downsampled_point_cloud, frame, noise_std=0.1, at
     print(f"Se eliminaron {zero_intensity_removed} puntos con intensidad cero.")
     print(f"Después de las pérdidas: {len(points)} puntos")
 
-    # Aplicar submuestreo basado en vóxeles
-    #points,semantic_tags, intensities = voxel_downsampling(points, semantic_tags, intensities)
-
 
 # 📌 Etapa 3: Puntos después del submuestreo
     downsampled_colors = np.array([get_color_from_semantic(tag) for tag in semantic_tags]) / 255.0
@@ -278,39 +239,6 @@ def lidar_callback(lidar_data, downsampled_point_cloud, frame, noise_std=0.1, at
         filename = os.path.join(output_dir, f"lidar_points_{frame:04d}.ply")
         print(f"Guardando archivo {filename}...")
         o3d.io.write_point_cloud(filename, downsampled_point_cloud)
-
-
-def lidar_low_callback(lidar_data, low_point_cloud, frame, noise_std=0.1, attenuation_coefficient=0.1):
-    data = np.copy(np.frombuffer(lidar_data.raw_data, dtype=np.dtype('f4')))
-    data = np.reshape(data, (int(data.shape[0] / 6), 6))  
-    data[:, 0] = -data[:, 0]
-
-    points = data[:, :3]
-    semantic_tags = data[:, 5].view(np.uint32)
-
-    ######### Aplicar ruido y perdidas ############
-    # Calcular la distancia de cada punto al sensor (suponiendo que el sensor está en el origen)
-    #distances = np.linalg.norm(points, axis=1)  # Distancia euclidiana
-
-    # Calcular la intensidad para cada punto utilizando la fórmula I = e^(-a * d)
-    #intensities = np.exp(-attenuation_coefficient * distances)
-    intensities = custom_intensity(points, semantic_tags)
-    
-    # Aplicar ruido a los puntos
-    points = add_noise_to_lidar(points, noise_std)
-
-    # Aplicar pérdidas de puntos según las reglas del LiDAR
-    points, semantic_tags, intensities, zero_intensity_removed = drop_points(points, semantic_tags, intensities)
-
-    # Mostrar el número de puntos eliminados con intensidad cero
-    print(f"Se eliminaron {zero_intensity_removed} puntos con intensidad cero.")
-
-    colors = np.array([get_color_from_semantic(tag) for tag in semantic_tags]) / 255.0
-    low_point_cloud.points = o3d.utility.Vector3dVector(points)
-    low_point_cloud.colors = o3d.utility.Vector3dVector(colors)
-
-    print(f"LiDAR de baja densidad: {len(points)} puntos capturados.")
-
 
 # Función para crear y configurar el vehículo con sensores
 def spawn_vehicle_lidar_camera_segmentation(world, bp, traffic_manager, delta):
@@ -333,18 +261,6 @@ def spawn_vehicle_lidar_camera_segmentation(world, bp, traffic_manager, delta):
     lidar_position = carla.Transform(carla.Location(x=-0.5, z=1.8))
     lidar = world.spawn_actor(lidar_bp, lidar_position, attach_to=vehicle)
 
-    # 📌 LiDAR CON SUBMUESTREO EN GENERACIÓN (Densidad reducida)
-    lidar_low_bp = bp.find('sensor.lidar.ray_cast_semantic')
-    lidar_low_bp.set_attribute('channels', '64')  # Menos canales
-    lidar_low_bp.set_attribute('range', '50')
-    lidar_low_bp.set_attribute('points_per_second', '500000')  # Menos puntos por segundo
-    lidar_low_bp.set_attribute('rotation_frequency', str(1 / delta))
-    lidar_low_bp.set_attribute('upper_fov', '30')
-    lidar_low_bp.set_attribute('lower_fov', '-30')
-    lidar_low_bp.set_attribute('horizontal_fov', '180')
-    lidar_low_position = carla.Transform(carla.Location(x=-0.5, z=1.8))
-    lidar_low = world.spawn_actor(lidar_low_bp, lidar_low_position, attach_to=vehicle)
-
     # Configuración de cámara RGB
     camera_bp = bp.find('sensor.camera.rgb')
     camera_bp.set_attribute('image_size_x', '800')
@@ -363,7 +279,7 @@ def spawn_vehicle_lidar_camera_segmentation(world, bp, traffic_manager, delta):
 
 
     vehicle.set_autopilot(True, traffic_manager.get_port())
-    return vehicle, lidar, lidar_low, camera, segmentation_camera
+    return vehicle, lidar, camera, segmentation_camera
 
 def set_camera_view(viz, third_person):
     ctr = viz.get_view_control()
@@ -434,7 +350,7 @@ def segmentation_callback(image, display_surface, frame):
     display_surface.blit(surface, (0, 0))
 
     # Llamar a la función para mostrar las etiquetas
-    display_labels(display_surface)
+    #display_labels(display_surface)
 
 
 
@@ -482,7 +398,7 @@ def display_labels(display_surface):
         y_offset += 30  # Mover hacia abajo para la siguiente etiqueta
 
 # Control del vehículo manual o automático
-def vehicle_control(vehicle):
+def vehicle_control(vehicle, max_speed_mps = 10):
     global manual_mode
     control = carla.VehicleControl()  # Crear un control en blanco
 
@@ -502,10 +418,26 @@ def vehicle_control(vehicle):
     # Aplicar controles si estamos en modo manual
     keys = pygame.key.get_pressed()
     if manual_mode:
-        control.throttle = 1.0 if keys[pygame.K_w] else 0.0
-        control.brake = 1.0 if keys[pygame.K_s] else 0.0
-        control.steer = -0.3 if keys[pygame.K_a] else 0.3 if keys[pygame.K_d] else 0.0
+        velocity = vehicle.get_velocity()
+        speed = np.linalg.norm([velocity.x, velocity.y, velocity.z])
+
+        if keys[pygame.K_w]:
+            if speed < max_speed_mps:
+                control.throttle = 1.0
+            else:
+                control.throttle = 0.0
+        if keys[pygame.K_s]:
+            control.brake = 1.0
+        if keys[pygame.K_a]:
+            control.steer = -0.3
+        elif keys[pygame.K_d]:
+            control.steer = 0.3
+        else:
+            control.steer = 0.0
+            
         vehicle.apply_control(control)
+
+
 
 # Configuración y ejecución del simulador
 def main():
@@ -540,10 +472,9 @@ def main():
     world.apply_settings(settings)
 
     global actor_list, third_person_view
-    vehicle, lidar, lidar_low, camera, segmentation_camera = spawn_vehicle_lidar_camera_segmentation(world, blueprint_library, traffic_manager, delta)
+    vehicle, lidar, camera, segmentation_camera = spawn_vehicle_lidar_camera_segmentation(world, blueprint_library, traffic_manager, delta)
     actor_list.append(vehicle)
     actor_list.append(lidar)
-    actor_list.append(lidar_low)
     #actor_list.append(lidar_low_2)
     #actor_list.append(lidar_low_3)
     actor_list.append(camera)
@@ -558,29 +489,24 @@ def main():
     
     
     downsampled_point_cloud = o3d.geometry.PointCloud()  # Nube submuestreada
-    lidar_low_point_cloud = o3d.geometry.PointCloud()
 
 
     frame = 0 # Contador de frames
 
     lidar.listen(lambda data: lidar_callback(data, downsampled_point_cloud, frame))
-    lidar_low.listen(lambda data: lidar_low_callback(data, lidar_low_point_cloud, frame))
-
 
     # Utilizar VisualizerWithKeyCallback
  # 📌 Crear dos visualizadores SEPARADOS
     viz_downsampled = o3d.visualization.Visualizer() # Puntos después del submuestreo
-    viz_lidar_low = o3d.visualization.Visualizer()
 
     
 
     viz_downsampled.create_window(window_name="Lidar Con Submuestreo", width=960, height=540, left=1100, top=100)
-    viz_lidar_low.create_window(window_name="Lidar Con Submuestreo en generación", width=960, height=540, left=1100, top=100)
 
     
-    for viz in [viz_downsampled, viz_lidar_low]:
+    for viz in [viz_downsampled]:
         viz.get_render_option().background_color = [0.05, 0.05, 0.05]
-        viz.get_render_option().point_size = 1.35
+        viz.get_render_option().point_size = 0.7
         viz.get_render_option().show_coordinate_frame = True
 
     third_person_view = True
@@ -593,7 +519,6 @@ def main():
         global third_person_view
         third_person_view = not third_person_view
         set_camera_view(viz_downsampled, third_person_view)
-        set_camera_view(viz_lidar_low, third_person_view)
         print("Cambiando a tercera persona" if third_person_view else "Cambiando a primera persona")
         return True  # Devolver True para continuar el evento de renderizado
 
@@ -609,7 +534,14 @@ def main():
 
         world.tick()  # Asegurar sincronización
 
+        vehicle_control(vehicle)
 
+        # 📌 Calcular y mostrar velocidad
+        velocity = vehicle.get_velocity()
+        speed = np.linalg.norm([velocity.x, velocity.y, velocity.z])
+        font = pygame.font.SysFont("Arial", 20)
+        speed_text = font.render(f"Velocidad: {speed * 3.6:.1f} km/h", True, (255, 255, 255))
+        rgb_surface.blit(speed_text, (10, 10))
 
         # Dibujar ambas subventanas en la ventana principal
         screen.blit(rgb_surface, (0, 0))                    # Poner RGB a la izquierda
@@ -618,27 +550,22 @@ def main():
 
         pygame.event.pump()  # Procesar eventos Pygame
 
-        vehicle_control(vehicle)
+
 
         if frame == 5 and not lidar_data_received:
-            viz_downsampled.add_geometry(downsampled_point_cloud)
-            viz_lidar_low.add_geometry(lidar_low_point_cloud) # Nube con submuestreo
+            viz_downsampled.add_geometry(downsampled_point_cloud)# Nube con submuestreo
             lidar_data_received = True
             print("Geometry added to the visualizer")
-            for viz in [viz_downsampled,viz_lidar_low]:
-                set_camera_view(viz, third_person_view)
+            set_camera_view(viz_downsampled, third_person_view)
 
 
         viz_downsampled.update_geometry(downsampled_point_cloud)
-        viz_lidar_low.update_geometry(lidar_low_point_cloud)
 
 
         viz_downsampled.poll_events()
-        viz_lidar_low.poll_events()
 
 
         viz_downsampled.update_renderer()
-        viz_lidar_low.update_renderer()
 
         # time.sleep(0.03)
         #world.tick()
@@ -652,7 +579,7 @@ def main():
         #dt0 = datetime.now()
         frame += 1
 
-        if not viz_lidar_low.poll_events() or not viz_downsampled.poll_events():
+        if not viz_downsampled.poll_events():
             print("Exiting visualization")
             break
 
