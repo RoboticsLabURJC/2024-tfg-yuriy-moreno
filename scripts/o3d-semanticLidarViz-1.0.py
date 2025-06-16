@@ -1,11 +1,23 @@
+import sys
+
+# # ¡ATENCIÓN! Este alias tiene que ir ANTES de cualquier otro import
+# if sys.version_info < (3, 9):
+#     try:
+#         import backports.zoneinfo
+#         sys.modules['zoneinfo'] = backports.zoneinfo
+#     except ImportError:
+#         print("Falta backports.zoneinfo. Instálalo con pip.")
+#         raise
+
 import carla
 import numpy as np
+import json
 import open3d as o3d
 import time
 import random
 from datetime import datetime
+import matplotlib.pyplot as plt
 from matplotlib import colormaps as cm
-import sys
 import signal
 import pygame
 import os
@@ -14,7 +26,16 @@ import cv2
 from scipy.spatial import cKDTree
 
 
-VIRIDIS = np.array(cm.get_cmap('inferno').colors)
+# Workaround para pandas en Python 3.8
+if sys.version_info < (3, 9):
+    try:
+        import backports.zoneinfo
+        sys.modules['zoneinfo'] = backports.zoneinfo
+    except ImportError:
+        print("Falta backports.zoneinfo. Instálalo con pip.")
+        raise
+
+VIRIDIS = np.array(plt.get_cmap('inferno').colors)
 VID_RANGE = np.linspace(0.0, 1.0, VIRIDIS.shape[0])
 
 # Variables globales
@@ -58,7 +79,7 @@ SEMANTIC_COLOR_MAP = {
 
 # Obtención del color según la etiqueta semántica
 def get_color_from_semantic(semantic_tag):
-    return SEMANTIC_COLOR_MAP.get(semantic_tag, (255, 255, 255))  # Color blanco si no está en la lista
+    return SEMANTIC_COLOR_MAP.get(int(semantic_tag), (255, 255, 255))  # Color blanco si no está en la lista
 
 def add_noise_to_lidar(points, std_dev):
     """
@@ -121,51 +142,88 @@ def drop_points(points, semantic_tags, intensities, drop_rate=0.45, intensity_li
 
     return points[final_mask],semantic_tags[final_mask],intensities[final_mask], zero_intensity_dropped
 
+# 1. Cargar datos originales de GOOSE
+with open("atenuacion_global.json") as f:
+    goose_stats = json.load(f)
 
-def custom_intensity(points: np.ndarray, semantic_tags: np.ndarray) -> np.ndarray:
-    """
-    Calcula intensidades personalizadas basadas en distancia y etiqueta semántica.
-    """
-    # Coeficientes de atenuación personalizados por clase
-    CUSTOM_ATTENUATION = {
-        0: 1.0,   # Unlabeled
-        1: 0.2,   # Roads
-        2: 0.3,   # SideWalks
-        3: 0.5,   # Building
-        4: 0.6,   # Wall
-        5: 0.6,   # Fence
-        6: 0.5,   # Pole
-        7: 0.4,   # TrafficLight
-        8: 0.4,   # TrafficSign
-        9: 0.8,   # Vegetation
-        10: 0.7,  # Terrain
-        11: 10.0, # Sky (ignorado)
-        12: 0.4,  # Pedestrian
-        13: 0.4,  # Rider
-        14: 0.2,  # Car
-        15: 0.2,  # Truck
-        16: 0.2,  # Bus
-        17: 0.2,  # Train
-        18: 0.2,  # Motorcycle
-        19: 0.2,  # Bicycle
-        20: 0.5,  # Static
-        21: 0.6,  # Dynamic
-        22: 0.8,  # Other
-        23: 1.5,  # Water
-        24: 0.3,  # RoadLine
-        25: 0.4,  # Ground
-        26: 0.5,  # Bridge
-        27: 0.5,  # RailTrack
-        28: 0.6   # GuardRail
-    }
+# 2. Mapeo manual de etiquetas GOOSE → CARLA
+GOOSE_TO_CARLA_LABELS = {
+    "0": 0,   # undefined
+    "23": 1,   # asphalt → road
+    "21": 2,   # sidewalk
+    "38": 3,   # building
+    "39": 4,   # wall
+    "41": 5,   # fence
+    "45": 6,   # pole
+    "19": 7,   # traffic light
+    "46": 8,   # traffic sign
+    "17": 9,   # bush → vegetation
+    "50": 10,  # low grass → terrain
+    "53": 11,  # sky
+    "14": 12,  # pedestrian
+    "32": 13,  # rider
+    "12": 14,  # car
+    "34": 15,  # truck
+    "15": 16,  # bus
+    "35": 17,  # on_rail → train
+    "20": 18,  # motorcycle
+    "13": 19,  # bicycle
+    "4": 20,  # obstacle → static
+    "4": 21,  # dynamic
+    "4": 22,  #  other       
+    "54": 23,   # water
+    "11": 24,  # road line
+    "31": 25,  # soil → ground
+    "43": 26,  # bridge
+    "26": 27,  # rail track
+    "42": 28  # guard rail
+}
 
-    # Calcular la distancia de cada punto al sensor (suponiendo que el sensor está en el origen)
-    coeffs = np.zeros_like(semantic_tags, dtype=np.float32)
-    for key, value in CUSTOM_ATTENUATION.items():
-        coeffs[semantic_tags == key] = value
-    distances = np.linalg.norm(points, axis=1)
+# 3. Crear diccionario final con etiquetas CARLA
+ATTENUATION_CARLA = {}
+for goose_label, carla_label in GOOSE_TO_CARLA_LABELS.items():
+    if goose_label in goose_stats:
+        ATTENUATION_CARLA[carla_label] = {
+            "mean": goose_stats[goose_label]["media"],
+            "std": goose_stats[goose_label]["std"]
+        }
+
+def custom_intensity(points: np.ndarray, semantic_tags: np.ndarray, attenuation_dict: dict, I0: float = 255.0, add_noise: bool = True) -> np.ndarray:
+    """
+    Calcula intensidades simuladas usando modelos de atenuación por clase.
     
-    return np.exp(-coeffs * distances)
+    I = I₀ · exp(−α · d), donde α puede tener una desviación aleatoria si `add_noise` es True.
+
+    Args:
+        points (np.ndarray): Puntos XYZ (Nx3).
+        semantic_tags (np.ndarray): Etiquetas semánticas por punto (N,).
+        attenuation_dict (dict): Diccionario {class_id: {"mean": μ, "std": σ}} con los coeficientes α por clase.
+        I0 (float): Intensidad máxima o ideal.
+        add_noise (bool): Si True, añade ruido Gaussiano a los α.
+
+    Returns:
+        np.ndarray: Intensidades simuladas (N,).
+    """
+
+    distances = np.linalg.norm(points, axis=1)
+    alphas = np.zeros_like(distances, dtype=np.float32)
+
+    for label, stats in attenuation_dict.items():
+        mask = semantic_tags == label
+        if not np.any(mask):
+            continue
+
+        mu = stats["mean"]
+        sigma = stats["std"] if add_noise else 0.0
+        alpha_values = np.random.normal(mu, sigma, size=np.count_nonzero(mask)) if add_noise else np.full(np.count_nonzero(mask), mu)
+        #alpha_values = np.clip(alpha_values, 0.0, None)
+        alphas[mask] = alpha_values
+
+    intensities = I0 * np.exp(-alphas * distances)
+    #intensities /= I0  # Pasa a rango [0, 1]
+    #intensities = I0 * np.exp(-1 * distances)
+    return intensities
+
 
 # Callback para procesar los datos del sensor LiDAR
 def lidar_callback(lidar_data, downsampled_point_cloud, frame, noise_std=0.1, attenuation_coefficient=0.1, output_dir = 'dataset/lidar'):
@@ -208,7 +266,7 @@ def lidar_callback(lidar_data, downsampled_point_cloud, frame, noise_std=0.1, at
 
     # Calcular la intensidad para cada punto utilizando la fórmula I = e^(-a * d)
     #intensities = np.exp(-attenuation_coefficient * distances)
-    intensities = custom_intensity(points, semantic_tags)
+    intensities = custom_intensity(points, semantic_tags, ATTENUATION_CARLA)
 
     # Aplicar ruido a los puntos
     points = add_noise_to_lidar(points, noise_std)
@@ -223,22 +281,28 @@ def lidar_callback(lidar_data, downsampled_point_cloud, frame, noise_std=0.1, at
 
 # 📌 Etapa 3: Puntos después del submuestreo
     downsampled_colors = np.array([get_color_from_semantic(tag) for tag in semantic_tags]) / 255.0
-    downsampled_point_cloud.points = o3d.utility.Vector3dVector(points)
-    downsampled_point_cloud.colors = o3d.utility.Vector3dVector(downsampled_colors) # Colores RGB normalizados (Nx3)
 
-    # Guardar las etiquetas semánticas en el campo "normals"
-    downsampled_point_cloud.normals = o3d.utility.Vector3dVector(np.c_[intensities, semantic_tags, semantic_tags])
+    ########Antigua forma de crear el point cloud########
+    # downsampled_point_cloud.points = o3d.utility.Vector3dVector(points)
+    # downsampled_point_cloud.colors = o3d.utility.Vector3dVector(downsampled_colors) # Colores RGB normalizados (Nx3)
+    # # Guardar las etiquetas semánticas en el campo "normals"
+    # downsampled_point_cloud.normals = o3d.utility.Vector3dVector(np.c_[semantic_tags, semantic_tags, semantic_tags])
 
-    
+    downsampled_point_cloud.point.positions = o3d.core.Tensor(points, dtype=o3d.core.Dtype.Float32)  # Puntos XYZ
+    downsampled_point_cloud.point.colors = o3d.core.Tensor(downsampled_colors, dtype=o3d.core.Dtype.Float32)  # Colores RGB normalizados (Nx3)
+    downsampled_point_cloud.point.labels = o3d.core.Tensor(semantic_tags.reshape(-1,1), dtype=o3d.core.Dtype.Int32)  # Etiquetas semánticas
+    downsampled_point_cloud.point.intensities = o3d.core.Tensor(intensities.reshape(-1,1), dtype=o3d.core.Dtype.Float32)  # Intensidades normalizadas (Nx1)
+
+
     # 📂 Guardar el point cloud cada 20 frames
     # Crear la carpeta de salida si no existe
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
     if frame % 20 == 0:
-        filename = os.path.join(output_dir, f"lidar_points_{frame:04d}.ply")
+        filename = os.path.join(output_dir, f"lidar_points_{frame:04d}.pcd")
         print(f"Guardando archivo {filename}...")
-        o3d.io.write_point_cloud(filename, downsampled_point_cloud)
+        o3d.t.io.write_point_cloud(filename, downsampled_point_cloud,write_ascii=False)
 
 # Función para crear y configurar el vehículo con sensores
 def spawn_vehicle_lidar_camera_segmentation(world, bp, traffic_manager, delta):
@@ -359,43 +423,43 @@ def segmentation_callback(image, display_surface, frame):
     #pygame.display.update(pygame.Rect(0, 600, image.width, image.height))
 
 # Diccionario de etiquetas y colores de segmentación
-LABELS = {
-    0: ("Desconocido", (0, 0, 0)),
-    1: ("Edificio", (70, 70, 70)),
-    2: ("Valla", (100, 40, 40)),
-    3: ("Otro", (55, 90, 80)),
-    4: ("Peatón", (220, 20, 60)),
-    5: ("Señalización", (153, 153, 153)),
-    6: ("Semáforo", (250, 170, 30)),
-    7: ("Vegetación", (107, 142, 35)),
-    8: ("Terreno", (152, 251, 152)),
-    9: ("Cielo", (70, 130, 180)),
-    10: ("Acera", (244, 35, 232)),
-    11: ("Carretera", (128, 64, 128)),
-    12: ("Barandilla", (190, 153, 153)),
-    13: ("Carril-bici", (0, 0, 230)),
-    14: ("Coche", (0, 0, 142)),
-    15: ("Motocicleta", (0, 0, 70)),
-    16: ("Bicicleta", (119, 11, 32)),
-    17: ("Tierra", (81, 0, 81))
-}
+# LABELS = {
+#     0: ("Desconocido", (0, 0, 0)),
+#     1: ("Edificio", (70, 70, 70)),
+#     2: ("Valla", (100, 40, 40)),
+#     3: ("Otro", (55, 90, 80)),
+#     4: ("Peatón", (220, 20, 60)),
+#     5: ("Señalización", (153, 153, 153)),
+#     6: ("Semáforo", (250, 170, 30)),
+#     7: ("Vegetación", (107, 142, 35)),
+#     8: ("Terreno", (152, 251, 152)),
+#     9: ("Cielo", (70, 130, 180)),
+#     10: ("Acera", (244, 35, 232)),
+#     11: ("Carretera", (128, 64, 128)),
+#     12: ("Barandilla", (190, 153, 153)),
+#     13: ("Carril-bici", (0, 0, 230)),
+#     14: ("Coche", (0, 0, 142)),
+#     15: ("Motocicleta", (0, 0, 70)),
+#     16: ("Bicicleta", (119, 11, 32)),
+#     17: ("Tierra", (81, 0, 81))
+# }
 
-def display_labels(display_surface):
-    # Inicializar la fuente para dibujar texto
-    font = pygame.font.SysFont("Arial", 18)
-    y_offset = 10  # Posición vertical inicial para el texto
+# def display_labels(display_surface):
+#     # Inicializar la fuente para dibujar texto
+#     font = pygame.font.SysFont("Arial", 18)
+#     y_offset = 10  # Posición vertical inicial para el texto
 
-    for label_id, (label_name, color) in LABELS.items():
-        # Crear una superficie para cada etiqueta
-        label_surface = font.render(f"{label_name}", True, color)
+#     for label_id, (label_name, color) in LABELS.items():
+#         # Crear una superficie para cada etiqueta
+#         label_surface = font.render(f"{label_name}", True, color)
 
-        # Dibujar un pequeño rectángulo de color al lado de cada etiqueta
-        color_rect = pygame.Rect(10, y_offset, 20, 20)
-        pygame.draw.rect(display_surface, color, color_rect)
+#         # Dibujar un pequeño rectángulo de color al lado de cada etiqueta
+#         color_rect = pygame.Rect(10, y_offset, 20, 20)
+#         pygame.draw.rect(display_surface, color, color_rect)
 
-        # Mostrar la etiqueta junto al rectángulo
-        display_surface.blit(label_surface, (40, y_offset))
-        y_offset += 30  # Mover hacia abajo para la siguiente etiqueta
+#         # Mostrar la etiqueta junto al rectángulo
+#         display_surface.blit(label_surface, (40, y_offset))
+#         y_offset += 30  # Mover hacia abajo para la siguiente etiqueta
 
 # Control del vehículo manual o automático
 def vehicle_control(vehicle, max_speed_mps = 10):
@@ -488,8 +552,8 @@ def main():
 
     
     
-    downsampled_point_cloud = o3d.geometry.PointCloud()  # Nube submuestreada
-
+    downsampled_point_cloud = o3d.t.geometry.PointCloud()  # Nube submuestreada
+    downsampled_point_cloud_legacy = o3d.geometry.PointCloud()  # Legacy solo para visualización
 
     frame = 0 # Contador de frames
 
@@ -497,6 +561,7 @@ def main():
 
     # Utilizar VisualizerWithKeyCallback
  # 📌 Crear dos visualizadores SEPARADOS
+ 
     viz_downsampled = o3d.visualization.Visualizer() # Puntos después del submuestreo
 
     
@@ -550,17 +615,48 @@ def main():
 
         pygame.event.pump()  # Procesar eventos Pygame
 
-
+        ######nuevo########
+        #downsampled_point_cloud_legacy = downsampled_point_cloud.to_legacy()
 
         if frame == 5 and not lidar_data_received:
-            viz_downsampled.add_geometry(downsampled_point_cloud)# Nube con submuestreo
+  
+            viz_downsampled.add_geometry(downsampled_point_cloud_legacy) 
+            ########
+
+            #viz_downsampled.add_geometry(downsampled_point_cloud)# Nube con submuestreo
             lidar_data_received = True
             print("Geometry added to the visualizer")
             set_camera_view(viz_downsampled, third_person_view)
 
 
-        viz_downsampled.update_geometry(downsampled_point_cloud)
 
+        #pcd_legacy.points = o3d.utility.Vector3dVector(np.asarray(downsampled_point_cloud.point["positions"]))
+        #downsampled_point_cloud_legacy.points = o3d.utility.Vector3dVector(downsampled_point_cloud.point["positions"].numpy())
+
+        # Opcional: colores si tienes etiquetas
+        # colors = np.array([get_color_from_semantic(int(t)) for t in downsampled_point_cloud.point["labels"].numpy().flatten()]) / 255.0
+        # downsampled_point_cloud_legacy.colors = o3d.utility.Vector3dVector(colors)
+
+        ################################333
+        try:
+            labels = downsampled_point_cloud.point["labels"].numpy().flatten()
+            positions = downsampled_point_cloud.point["positions"].numpy()
+        except RuntimeError:
+            print("⚠️ Frame descartado por conflicto de acceso.")
+            continue
+
+        if labels.shape[0] == positions.shape[0]:
+            colors = np.array([get_color_from_semantic(int(t)) for t in labels]) / 255.0
+            downsampled_point_cloud_legacy.points = o3d.utility.Vector3dVector(positions)
+            downsampled_point_cloud_legacy.colors = o3d.utility.Vector3dVector(colors)
+        else:
+            print(f"❌ Mismatch de etiquetas/puntos: {labels.shape[0]} vs {positions.shape[0]}")
+            continue
+
+
+        #########################################
+        #viz_downsampled.update_geometry(downsampled_point_cloud)
+        viz_downsampled.update_geometry(downsampled_point_cloud_legacy)
 
         viz_downsampled.poll_events()
 
