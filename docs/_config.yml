@@ -74,6 +74,9 @@ author:
     - label: "Instagram"
       icon: "fab fa-fw fa-instagram"
       url: "https://instagram.com/"
+    - label: "Datasets"
+      icon: "fas fa-fw fa-database"
+      url: "https://drive.google.com/drive/folders/1iz2K0bYWf9yKs6UCbQjXCGefHsTeYSHq?usp=drive_link"
 
 footer:
   links:
@@ -86,6 +89,10 @@ footer:
     - label: "Instagram"
       icon: "fab fa-fw fa-instagram"
       url: "https://instagram.com/"
+    - label: "Datasets"
+      icon: "fas fa-fw fa-database"
+      url: "https://drive.google.com/drive/folders/1iz2K0bYWf9yKs6UCbQjXCGefHsTeYSHq?usp=drive_link"
+
 
 defaults:
   # _posts
