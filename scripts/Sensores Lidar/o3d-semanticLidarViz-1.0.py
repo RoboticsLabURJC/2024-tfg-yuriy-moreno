@@ -143,7 +143,7 @@ def drop_points(points, semantic_tags, intensities, drop_rate=0.45, intensity_li
     return points[final_mask],semantic_tags[final_mask],intensities[final_mask], zero_intensity_dropped
 
 # 1. Cargar datos originales de GOOSE
-with open("atenuacion_global.json") as f:
+with open("/home/yuriy/Universidad/2024-tfg-yuriy-moreno/scripts/Calcular Atenuacion/atenuacion_global.json") as f:
     goose_stats = json.load(f)
 
 # 2. Mapeo manual de etiquetas GOOSE → CARLA
@@ -524,6 +524,27 @@ def main():
     client.set_timeout(10.0)
 
     world = client.get_world()
+
+    # Configurar el clima
+    weather = carla.WeatherParameters(
+        cloudiness=50.0,                # 0–100 → Nubosidad (0 = cielo despejado)
+        precipitation=50.0,             # 0–100 → Lluvia (0 = sin lluvia, 100 = lluvia intensa)
+        precipitation_deposits=50.0,    # 0–100 → Charcos en el suelo
+        wind_intensity=50.0,            # 0–100 → Viento
+        sun_azimuth_angle=90.0,         # 0–360° → Dirección del sol (horizontal)
+        sun_altitude_angle=35.0,        # -90 a 90° → Altura del sol (90 = mediodía)
+        fog_density=100.0,               # 0–100 → Grosor de la niebla
+        fog_distance=10.0,              # metros → Inicio de la niebla
+        wetness=100.0,                   # 0–100 → Humedad del asfalto
+        fog_falloff=2.0,               # >0.0 → Caída de visibilidad con la distancia
+        scattering_intensity=10.0,      # 0–∞ → Contribución de la luz en niebla volumétrica
+        mie_scattering_scale=10.0,      # 0–∞ → Efecto de partículas grandes (humo, polvo)
+        rayleigh_scattering_scale=10.0, # 0–∞ → Efecto de partículas pequeñas (moléculas del aire)
+        dust_storm=30.0                # 0–1 → Intensidad de tormenta de polvo
+    )
+    world.set_weather(weather)
+
+
     blueprint_library = world.get_blueprint_library()
     traffic_manager = client.get_trafficmanager(8000)
     traffic_manager.set_synchronous_mode(True)
