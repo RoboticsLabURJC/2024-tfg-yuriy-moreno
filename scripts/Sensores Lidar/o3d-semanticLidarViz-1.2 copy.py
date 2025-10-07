@@ -44,6 +44,7 @@ manual_mode = False
 
 # Mapa de colores para etiquetas semánticas
 SEMANTIC_COLOR_MAP = {
+    -1: (255, 255, 255),  # puntos cósmicos(blanco)
     0: (0, 0, 0),         # Ningún objeto (negro)
     1: (128, 64, 128),    # Carretera
     2: (244, 35, 232),    # Acera
@@ -94,6 +95,37 @@ def add_noise_to_lidar(points, std_dev):
     noisy_points = points + noise
     return noisy_points
 
+def add_cosmic_noise_points(points, semantic_tags, max_range, 
+                            hfov, upper_fov, lower_fov,
+                            rate=0.001):
+    """
+    Inserta puntos falsos ('ruido cósmico') en el mismo marco que los datos del LiDAR.
+    Como los puntos del LiDAR ya están en coordenadas globales, 
+    aquí generamos directamente en mundo sin transformaciones extra.
+    """
+    N = points.shape[0]
+    n_fake = int(N * rate)
+    if n_fake == 0:
+        return points, semantic_tags
+
+    # Generar coordenadas XYZ aleatorias en el rango del LiDAR
+    az = np.radians(np.random.uniform(-hfov/2, hfov/2, n_fake))
+    el = np.radians(np.random.uniform(lower_fov, upper_fov, n_fake))
+    r  = np.random.uniform(0.1, max_range, n_fake)
+
+    x = -r * np.cos(el) * np.cos(az)
+    y = r * np.cos(el) * np.sin(az)
+    z = r * np.sin(el)
+
+    fake_points_world = np.stack([x, y, z], axis=1)
+
+    # Etiquetas de ruido cósmico (-1)
+    fake_tags = np.full(n_fake, -1, dtype=np.int32)
+
+    points_new = np.vstack([points, fake_points_world])
+    semantic_tags_new = np.concatenate([semantic_tags, fake_tags])
+
+    return points_new, semantic_tags_new
 
 
 def drop_points(points, semantic_tags, intensities, drop_rate=0.45, intensity_limit=0.8, zero_intensity_drop=0.4, low_intensity_threshold=0.01 ):
@@ -226,7 +258,7 @@ def custom_intensity(points: np.ndarray, semantic_tags: np.ndarray, attenuation_
 
 
 # Callback para procesar los datos del sensor LiDAR
-def lidar_callback(lidar_data, downsampled_point_cloud, frame, noise_std=0.1, attenuation_coefficient=0.1, output_dir = 'dataset/lidar'):
+def lidar_callback(lidar_data, downsampled_point_cloud, frame,lidar, lidar_range, hfov, upper_fov, lower_fov , noise_std=0.1, attenuation_coefficient=0.1, output_dir = 'dataset/lidar'):
     """
     Procesa los datos del LiDAR obtenidos en cada frame.
     - Guarda una copia de la nube de puntos original (sin modificaciones).
@@ -256,6 +288,9 @@ def lidar_callback(lidar_data, downsampled_point_cloud, frame, noise_std=0.1, at
     # Extraer etiquetas semánticas
     semantic_tags = data[:, 5].view(np.uint32)  # Convertir los datos a enteros
 
+    print("Sensor pose (lidar.get_transform):", lidar.get_transform())
+    print("First LiDAR point (from raw_data):", points[0])
+
 
     print(f"Antes de las pérdidas: {len(points)} puntos")
     
@@ -266,10 +301,18 @@ def lidar_callback(lidar_data, downsampled_point_cloud, frame, noise_std=0.1, at
 
     # Calcular la intensidad para cada punto utilizando la fórmula I = e^(-a * d)
     #intensities = np.exp(-attenuation_coefficient * distances)
-    intensities = custom_intensity(points, semantic_tags, ATTENUATION_CARLA)
+   
 
     # Aplicar ruido a los puntos
     points = add_noise_to_lidar(points, noise_std)
+
+    points, semantic_tags = add_cosmic_noise_points(
+        points, semantic_tags, rate=0.1,
+        max_range=lidar_range, hfov=hfov,
+        upper_fov=upper_fov, lower_fov=lower_fov,
+    )
+
+    intensities = custom_intensity(points, semantic_tags, ATTENUATION_CARLA)
 
     # Aplicar pérdidas de puntos según las reglas del LiDAR
     points, semantic_tags, intensities, zero_intensity_removed = drop_points(points, semantic_tags, intensities)
@@ -558,6 +601,15 @@ def main():
 
     global actor_list, third_person_view
     vehicle, lidar, camera, segmentation_camera = spawn_vehicle_lidar_camera_segmentation(world, blueprint_library, traffic_manager, delta)
+
+    # Obtener atributos del LiDAR
+    attrs = lidar.attributes  # diccionario de strings
+    lidar_range    = float(attrs['range'])
+    upper_fov      = float(attrs['upper_fov'])
+    lower_fov      = float(attrs['lower_fov'])
+    horizontal_fov = float(attrs['horizontal_fov'])
+
+
     actor_list.append(vehicle)
     actor_list.append(lidar)
     #actor_list.append(lidar_low_2)
@@ -578,10 +630,19 @@ def main():
 
     frame = 0 # Contador de frames
 
-    lidar.listen(lambda data: lidar_callback(data, downsampled_point_cloud, frame))
+    lidar.listen(lambda data: lidar_callback(data, 
+            downsampled_point_cloud, 
+            frame,
+            lidar,
+            noise_std=0.1,
+            output_dir='dataset/lidar',
+            lidar_range=lidar_range,
+            hfov=horizontal_fov,
+            upper_fov=upper_fov,
+            lower_fov=lower_fov))
 
     # Utilizar VisualizerWithKeyCallback
- # 📌 Crear dos visualizadores SEPARADOS
+ # Crear dos visualizadores SEPARADOS
  
     viz_downsampled = o3d.visualization.Visualizer() # Puntos después del submuestreo
 
