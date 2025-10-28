@@ -22,7 +22,9 @@ import cv2
 # --- Variables PID globales ---
 previous_error = 0.0
 integral = 0.0
-visual_error = 0.0
+rgb_image = None
+visual_error = 0
+segmentation_model = None
 ####### Control PID ########
 
 # Workaround para pandas en Python 3.8
@@ -448,17 +450,10 @@ def spawn_vehicle_lidar_camera_segmentation(world, bp, traffic_manager, delta):
     camera_transform = carla.Transform(carla.Location(x=1, z=1.5))
     camera = world.spawn_actor(camera_bp, camera_transform, attach_to=vehicle)
 
-    # Configuración de cámara de segmentación semántica
-    segmentation_bp = bp.find('sensor.camera.semantic_segmentation')
-    segmentation_bp.set_attribute('image_size_x', '800')
-    segmentation_bp.set_attribute('image_size_y', '600')
-    segmentation_bp.set_attribute('fov', '90')
-    segmentation_transform = carla.Transform(carla.Location(x=1, z=1.5))
-    segmentation_camera = world.spawn_actor(segmentation_bp, segmentation_transform, attach_to=vehicle)
 
 
     vehicle.set_autopilot(True, traffic_manager.get_port())
-    return vehicle, lidar, camera, segmentation_camera
+    return vehicle, lidar, camera
 
 def set_camera_view(viz, third_person):
     ctr = viz.get_view_control()
@@ -476,6 +471,8 @@ def set_camera_view(viz, third_person):
         ctr.set_up([-1, 0, 0])
 
 def camera_callback(image, display_surface, frame):
+    global rgb_image
+
     output_dir = 'dataset/rgb'
     # Crear el directorio si no existe
     if not os.path.exists(output_dir):
@@ -496,36 +493,114 @@ def camera_callback(image, display_surface, frame):
 
 
     array = array[:, :, ::-1]  # Convertir de BGRA a RGB
+    rgb_image = array.copy()  # Guardar la imagen RGB globalmente
+
     surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
     display_surface.blit(surface, (0, 0))
     # Actualizar solo esta superficie en vez de toda la pantalla
     #pygame.display.update(display_surface.get_rect())
 
+import onnxruntime as ort
+from PIL import Image
+import torch
+import torch.nn.functional as F
+from torchvision import transforms
+
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD = [0.229, 0.224, 0.225]
+COMMON_ONTOLOGY = {
+    "void": {"idx": 0, "rgb": [0, 0, 0]},
+    "water": {"idx": 1, "rgb": [0, 0, 128]},
+    "obstacle": {"idx": 2, "rgb": [255, 0, 0]},
+    "nondrivable_vegetation": {"idx": 3, "rgb": [0, 128, 0]},
+    "drivable_vegetation": {"idx": 4, "rgb": [0, 255, 0]},
+    "unstable_terrain": {"idx": 5, "rgb": [128, 64, 32]},
+    "stable_terrain": {"idx": 6, "rgb": [128, 128, 128]},
+    "sky": {"idx": 7, "rgb": [128, 128, 255]},
+}
+
+def ontology_to_lut(ontology):
+    """Convert ontology to look-up table."""
+    max_idx = max(v["idx"] for v in ontology.values())
+    lut = np.zeros((max_idx + 1, 3), dtype=np.uint8)
+    for v in ontology.values():
+        lut[v["idx"]] = v["rgb"]
+    return lut
+
+def load_segmentation_model(model_path="/home/yuriy/Downloads/segformer_mit-b2_8xb1.pt" , device="cuda"):
+    print(f"Cargando modelo de segmentación desde {model_path}...")
+    model = torch.load(model_path, map_location=device)
+    model = model.to(device).eval()
+    print("Modelo cargado correctamente.")
+    return model
+
+def run_segmentation_model(model, device="cuda", inference_mode= "torch"):
+    global rgb_image
+    image = rgb_image
+    lut = ontology_to_lut(COMMON_ONTOLOGY)
+    
+    image = Image.fromarray(image)
+    tensor = transforms.ToTensor()(image).unsqueeze(0)
+    tensor = transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)(tensor)
+
+    #model = model.to("cuda").eval()
+    tensor = tensor.cuda()
+
+    if inference_mode == "torch":
+        pred = model(tensor).cpu()
+    elif inference_mode == "mmsegmentation":
+        pred = model.inference(
+            tensor,
+            [
+                dict(
+                    ori_shape=tensor.shape[2:],
+                    img_shape=tensor.shape[2:],
+                    pad_shape=tensor.shape[2:],
+                    padding_size=[0, 0, 0, 0],
+                )
+            ],
+        ).cpu()
+    else:
+        raise ValueError("Invalid inference mode provided.")
+    
+    if inference_mode != "mmsegmentation":
+        pred = F.interpolate(pred, tensor.shape[2:], mode="bilinear")
+
+    pred = torch.argmax(pred, dim=1).squeeze().numpy()
+    pred_rgb = lut[pred]
+
+    pred_rgb = Image.fromarray(pred_rgb)
+
+    return pred_rgb
+
 def segmentation_callback(image, display_surface, frame):
-    global visual_error
+    global visual_error, rgb_image, segmentation_model
+
+     # Asegurarse de que hay imagen RGB disponible
+    if rgb_image is None:
+        print("No hay imagen RGB disponible aún.")
+        return
+    
 
     output_dir = 'dataset/segmentation'
     # Crear el directorio si no existe
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    # Convertir la imagen de segmentación directamente usando CityScapesPalette
-    image.convert(carla.ColorConverter.CityScapesPalette)
-    
-    # Convertir los datos de la imagen a un array numpy
-    array = np.frombuffer(image.raw_data, dtype=np.uint8)
-    array = np.reshape(array, (image.height, image.width, 4))
+    # Ejecutar el modelo de segmentación neuronal
+    pred_rgb = run_segmentation_model(segmentation_model,inference_mode="torch")
 
-    # Extraer los canales RGB y convertir de BGRA a RGB
-    seg_array = np.copy(array[:, :, :3])  # copiar para hacerla editable
-    seg_array = seg_array[:, :, ::-1]
-    seg_array.setflags(write=1)  # Asegurarse de que el array es escribible
-    seg_array = np.ascontiguousarray(seg_array)  # 👈 garantiza layout correcto
+
+    # Convertir el resultado a numpy
+    seg_array = np.array(pred_rgb)
+    seg_array = np.ascontiguousarray(seg_array)
 
     ####### Control PID ########
      # --- Buscar color del terreno ---
-    lower = np.array([70, 0, 70], dtype=np.uint8)
-    upper = np.array([90, 20, 90], dtype=np.uint8)
+    #lower = np.array([70, 0, 70], dtype=np.uint8)
+    #upper = np.array([90, 20, 90], dtype=np.uint8)
+    lower = np.array([128, 128, 128], dtype=np.uint8)
+    upper = np.array([140, 140, 140], dtype=np.uint8)
     mask = cv2.inRange(seg_array, lower, upper)
 
     # --- Calcular centroide del terreno ---
@@ -555,17 +630,8 @@ def segmentation_callback(image, display_surface, frame):
         cv2.imwrite(filename, combined)
 
     # Crear la superficie de Pygame y mostrarla en la sección inferior de la pantalla
-    #surface = pygame.surfarray.make_surface(seg_array.swapaxes(0, 1))
     display_surface.blit(surface, (0, 0))
 
-    # Llamar a la función para mostrar las etiquetas
-    #display_labels(display_surface)
-
-
-
-    
-    # Actualizar solo el área de la pantalla donde se muestra la segmentación
-    #pygame.display.update(pygame.Rect(0, 600, image.width, image.height))
 
 
 # Control del vehículo manual o automático
@@ -698,7 +764,15 @@ def main():
     world.apply_settings(settings)
 
     global actor_list, third_person_view
-    vehicle, lidar, camera, segmentation_camera = spawn_vehicle_lidar_camera_segmentation(world, blueprint_library, traffic_manager, delta)
+    vehicle, lidar, camera = spawn_vehicle_lidar_camera_segmentation(world, blueprint_library, traffic_manager, delta)
+
+    ########################333
+    print("Cargando modelo de segmentación neuronal...")
+    global segmentation_model
+    segmentation_model = load_segmentation_model(
+        "/home/yuriy/Downloads/segformer_mit_b2_8xb1.pt"
+    )
+    ############################
 
     # Obtener atributos del LiDAR
     attrs = lidar.attributes  # diccionario de strings
@@ -713,13 +787,13 @@ def main():
     #actor_list.append(lidar_low_2)
     #actor_list.append(lidar_low_3)
     actor_list.append(camera)
-    actor_list.append(segmentation_camera)
 
     # Llamada al callback de cámara RGB
     camera.listen(lambda image: camera_callback(image, rgb_surface, frame))
 
     # Llamada al callback de segmentación
-    segmentation_camera.listen(lambda image: segmentation_callback(image, segmentation_surface, frame))
+    def process_segmentation():
+        segmentation_callback(None, segmentation_surface, frame)
 
     
     
@@ -779,6 +853,7 @@ def main():
 
         world.tick()  # Asegurar sincronización
 
+        process_segmentation()
         vehicle_control(vehicle)
 
         # 📌 Calcular y mostrar velocidad
