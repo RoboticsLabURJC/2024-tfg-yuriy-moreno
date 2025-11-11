@@ -508,7 +508,7 @@ from torchvision import transforms
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
-COMMON_ONTOLOGY = {
+COMMON_ONTOLOGY_ORIGINAL = {
     "void": {"idx": 0, "rgb": [0, 0, 0]},
     "water": {"idx": 1, "rgb": [0, 0, 128]},
     "obstacle": {"idx": 2, "rgb": [255, 0, 0]},
@@ -519,6 +519,10 @@ COMMON_ONTOLOGY = {
     "sky": {"idx": 7, "rgb": [128, 128, 255]},
 }
 
+with open("/home/yuriy/Universidad/2024-tfg-yuriy-moreno/scripts/dataset/pinar_train/ontology.json", "r") as f:
+    COMMON_ONTOLOGY = json.load(f)
+    
+    
 def ontology_to_lut(ontology):
     """Convert ontology to look-up table."""
     max_idx = max(v["idx"] for v in ontology.values())
@@ -527,14 +531,14 @@ def ontology_to_lut(ontology):
         lut[v["idx"]] = v["rgb"]
     return lut
 
-def load_segmentation_model(model_path="/home/yuriy/Downloads/segformer_mit-b2_8xb1.pt" , device="cuda"):
+def load_segmentation_model(model_path, device="cuda"):
     print(f"Cargando modelo de segmentación desde {model_path}...")
     model = torch.load(model_path, map_location=device)
     model = model.to(device).eval()
     print("Modelo cargado correctamente.")
     return model
 
-def run_segmentation_model(model, device="cuda", inference_mode= "torch"):
+def run_segmentation_model(model, device="cuda", inference_mode= "mmsegmentation"):
     global rgb_image
     image = rgb_image
     lut = ontology_to_lut(COMMON_ONTOLOGY)
@@ -586,10 +590,14 @@ def segmentation_callback(image, display_surface, frame):
     # Crear el directorio si no existe
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
+    
+    output_raw_dir = 'dataset/segmentation_idx'
+    if not os.path.exists(output_raw_dir):
+        os.makedirs(output_raw_dir)
+
 
     # Ejecutar el modelo de segmentación neuronal
     pred_rgb = run_segmentation_model(segmentation_model,inference_mode="torch")
-
 
     # Convertir el resultado a numpy
     seg_array = np.array(pred_rgb)
@@ -597,10 +605,10 @@ def segmentation_callback(image, display_surface, frame):
 
     ####### Control PID ########
      # --- Buscar color del terreno ---
-    #lower = np.array([70, 0, 70], dtype=np.uint8)
-    #upper = np.array([90, 20, 90], dtype=np.uint8)
-    lower = np.array([128, 128, 128], dtype=np.uint8)
-    upper = np.array([140, 140, 140], dtype=np.uint8)
+    lower = np.array([70, 0, 70], dtype=np.uint8)
+    upper = np.array([90, 20, 90], dtype=np.uint8)
+    #lower = np.array([0, 0, 60], dtype=np.uint8)
+    #upper = np.array([10, 10, 70], dtype=np.uint8)
     mask = cv2.inRange(seg_array, lower, upper)
 
     # --- Calcular centroide del terreno ---
@@ -627,7 +635,8 @@ def segmentation_callback(image, display_surface, frame):
     if frame % 20 == 0:
         filename = os.path.join(output_dir, f"segmentation_{frame:04d}.png")
         print(f"Guardando imagen de segmentación en {filename}")
-        cv2.imwrite(filename, combined)
+
+        cv2.imwrite(filename, seg_array[:, :, ::-1])
 
     # Crear la superficie de Pygame y mostrarla en la sección inferior de la pantalla
     display_surface.blit(surface, (0, 0))
@@ -749,7 +758,7 @@ def main():
         rayleigh_scattering_scale=0.0, # 0–∞ → Efecto de partículas pequeñas (moléculas del aire)
         dust_storm=0.0                # 0–1 → Intensidad de tormenta de polvo
     )
-    world.set_weather(weather)
+    #world.set_weather(weather)
 
 
     blueprint_library = world.get_blueprint_library()
@@ -770,7 +779,8 @@ def main():
     print("Cargando modelo de segmentación neuronal...")
     global segmentation_model
     segmentation_model = load_segmentation_model(
-        "/home/yuriy/Downloads/segformer_mit_b2_8xb1.pt"
+        #"/home/yuriy/Downloads/segformer_mit_b2_8xb1.pt"
+        "/home/yuriy/Universidad/2024-tfg-yuriy-moreno/models/prueba-epoch=epoch=98-step=step=1089-val_miou=val_miou=0.14.pt"
     )
     ############################
 
