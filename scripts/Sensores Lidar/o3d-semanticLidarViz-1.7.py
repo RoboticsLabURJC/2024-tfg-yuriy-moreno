@@ -83,19 +83,6 @@ SEMANTIC_COLOR_MAP = {
 def get_color_from_semantic(semantic_tag):
     return SEMANTIC_COLOR_MAP.get(int(semantic_tag), (255, 255, 255))  # Color blanco si no está en la lista
 
-def add_noise_to_lidar(points, std_dev):
-    """
-    Agrega ruido gaussiano a la nube de puntos LiDAR.
-    Args:
-        points: np.array (N, 3) - Coordenadas XYZ del LiDAR semántico
-        std_dev: float - Desviación estándar del ruido
-    Returns:
-        np.array (N, 3) - Nube de puntos con ruido
-    """
-    noise = np.random.normal(0, std_dev, points.shape)  # Ruido Gaussiano
-    noisy_points = points + noise
-    return noisy_points
-
 def add_cosmic_noise_points(points, semantic_tags, max_range, 
                             hfov, upper_fov, lower_fov,
                             rate=0.001):
@@ -187,52 +174,6 @@ def subsample_by_rays(points, semantic_tags, ring_id, step_ray=2):
     return points[mask], semantic_tags[mask], mask
 
 
-def drop_points(points, semantic_tags, intensities, drop_rate=0.45, intensity_limit=0.8, zero_intensity_drop=0.4, low_intensity_threshold=0.01 ):
-    """
-    Aplica pérdidas de puntos con la misma lógica que el LiDAR de CARLA.
-    - Primero aplica pérdida aleatoria.
-    - Luego protege puntos con intensidad alta.
-    - Luego elimina puntos con intensidad cero con probabilidad extra.
-
-    Args:
-    - points: np.array (N, 3) - Coordenadas XYZ del LiDAR (sin información adicional como colores o etiquetas).
-    - semantic_tags: np.array (N,) - Etiquetas semánticas de cada punto.
-    - intensities: np.array (N,) - Intensidades de los puntos.
-    - drop_rate: float - Probabilidad de eliminar un punto de forma aleatoria.
-    - intensity_limit: float - Umbral por encima del cual no se eliminan puntos (protección de puntos con alta intensidad).
-    - zero_intensity_drop: float - Probabilidad de eliminar puntos con intensidad cero.
-    - low_intensity_threshold: float - Umbral bajo de intensidad a partir del cual se eliminan los puntos.
-
-    Returns:
-        np.array (M, 3) - Nube de puntos con menos puntos
-        np.array (M,) - Etiquetas semánticas filtradas
-    """
-
-    num_points = points.shape[0]
-
-    # Máscara de eliminación aleatoria
-    mask_drop_random = np.random.rand(num_points) < drop_rate
-
-    # Restaurar puntos con alta intensidad (> intensity_limit)
-    mask_keep_high_intensity = intensities > intensity_limit
-    mask_drop_random[mask_keep_high_intensity] = False  # No eliminamos estos puntos
-
-    # Verificar cuántos puntos tienen intensidad muy baja
-    num_low_intensity = np.sum(intensities < low_intensity_threshold)
-    print(f"Cantidad de puntos con intensidad menor a {low_intensity_threshold}: {num_low_intensity}")
-
-    # Máscara para eliminar puntos con intensidad baja (por debajo del umbral)
-    mask_drop_low_intensity = (intensities < low_intensity_threshold) & (np.random.rand(num_points) < zero_intensity_drop)
-
-
-    # Contamos cuántos puntos con intensidad cero se eliminan
-    zero_intensity_dropped = np.sum(mask_drop_low_intensity)
-    
-    # Combinamos todas las eliminaciones
-    final_mask = ~mask_drop_random & ~mask_drop_low_intensity
-
-    return points[final_mask],semantic_tags[final_mask],intensities[final_mask], zero_intensity_dropped
-
 # 1. Cargar datos originales de GOOSE
 with open("/home/yuriy/Universidad/2024-tfg-yuriy-moreno/scripts/Calcular Atenuacion/atenuacion_global.json") as f:
     goose_stats = json.load(f)
@@ -317,7 +258,7 @@ def custom_intensity(points: np.ndarray, semantic_tags: np.ndarray, attenuation_
 
 
 # Callback para procesar los datos del sensor LiDAR
-def lidar_callback(lidar_data, downsampled_point_cloud, frame,lidar, lidar_range, hfov, upper_fov, lower_fov , noise_std=0.1, attenuation_coefficient=0.1, output_dir = 'dataset/lidar'):
+def lidar_callback(lidar_data, downsampled_point_cloud, frame,lidar, lidar_range, hfov, upper_fov, lower_fov , noise_std=0.1, attenuation_coefficient=0.1, output_dir = 'dataset/lidar', output_bin_dir='dataset/lidar_bin'):
     """
     Procesa los datos del LiDAR obtenidos en cada frame.
     - Guarda una copia de la nube de puntos original (sin modificaciones).
@@ -336,16 +277,16 @@ def lidar_callback(lidar_data, downsampled_point_cloud, frame,lidar, lidar_range
     """
     # 1) Datos originales (sin modificaciones)
     data = np.copy(np.frombuffer(lidar_data.raw_data, dtype=np.dtype('f4')))
-    data = np.reshape(data, (int(data.shape[0] / 6), 6))  # Ahora cada fila tiene 6 valores
+    data = np.reshape(data, (int(data.shape[0] / 4), 4))  # Ahora cada fila tiene 6 valores
 
     # Reflejar los datos en el eje X para mantener coherencia con el sistema de coordenadas de CARLA
     data[:, 0] = -data[:, 0]
 
     # Extraer las coordenadas XYZ y los valores de intensidad
     points = data[:, :3]
-
+    intensities = data[:, -1]
     # Extraer etiquetas semánticas
-    semantic_tags = data[:, 5].view(np.uint32)  # Convertir los datos a enteros
+    #semantic_tags = data[:, 5].view(np.uint32)  # Convertir los datos a enteros
 
 
     print("Sensor pose (lidar.get_transform):", lidar.get_transform())
@@ -361,12 +302,11 @@ def lidar_callback(lidar_data, downsampled_point_cloud, frame,lidar, lidar_range
 
     # Calcular la intensidad para cada punto utilizando la fórmula I = e^(-a * d)
     #intensities = np.exp(-attenuation_coefficient * distances)
-
     # 2) ring_id
-    channels = int(lidar.attributes['channels'])
-    ring_id = calculate_ring_id(points, channels,
-                          lower_fov=lower_fov,
-                          upper_fov=upper_fov)
+    #channels = int(lidar.attributes['channels'])
+    #ring_id = calculate_ring_id(points, channels,
+    #                      lower_fov=lower_fov,
+    #                      upper_fov=upper_fov)
 
     # 3) Submuestreo por haces (canales)
     #points, semantic_tags,mask = subsample_by_ring_id(points, semantic_tags, ring_id, step=4) # 32 canales
@@ -376,19 +316,14 @@ def lidar_callback(lidar_data, downsampled_point_cloud, frame,lidar, lidar_range
     #points, semantic_tags, mask_ray = subsample_by_rays(points, semantic_tags, ring_id, step_ray=10)
     #ring_id = ring_id[mask_ray]
 
-    # Aplicar ruido a los puntos
-    #points = add_noise_to_lidar(points, noise_std)
+    #points, semantic_tags = add_cosmic_noise_points(
+    #    points, semantic_tags, rate=0.01,
+    #    max_range=lidar_range, hfov=hfov,
+    #    upper_fov=upper_fov, lower_fov=lower_fov,
+    #)
 
-    points, semantic_tags = add_cosmic_noise_points(
-        points, semantic_tags, rate=0.01,
-        max_range=lidar_range, hfov=hfov,
-        upper_fov=upper_fov, lower_fov=lower_fov,
-    )
+    #intensities = custom_intensity(points, semantic_tags, ATTENUATION_CARLA)
 
-    intensities = custom_intensity(points, semantic_tags, ATTENUATION_CARLA)
-
-    # Aplicar pérdidas de puntos según las reglas del LiDAR
-    #points, semantic_tags, intensities, zero_intensity_removed = drop_points(points, semantic_tags, intensities)
 
     # Mostrar el número de puntos eliminados con intensidad cero
     #print(f"Se eliminaron {zero_intensity_removed} puntos con intensidad cero.")
@@ -396,7 +331,7 @@ def lidar_callback(lidar_data, downsampled_point_cloud, frame,lidar, lidar_range
 
 
 # 📌 Etapa 3: Puntos después del submuestreo
-    downsampled_colors = np.array([get_color_from_semantic(tag) for tag in semantic_tags]) / 255.0
+    #downsampled_colors = np.array([get_color_from_semantic(tag) for tag in semantic_tags]) / 255.0
 
     ########Antigua forma de crear el point cloud########
     # downsampled_point_cloud.points = o3d.utility.Vector3dVector(points)
@@ -405,8 +340,8 @@ def lidar_callback(lidar_data, downsampled_point_cloud, frame,lidar, lidar_range
     # downsampled_point_cloud.normals = o3d.utility.Vector3dVector(np.c_[semantic_tags, semantic_tags, semantic_tags])
 
     downsampled_point_cloud.point.positions = o3d.core.Tensor(points, dtype=o3d.core.Dtype.Float32)  # Puntos XYZ
-    downsampled_point_cloud.point.colors = o3d.core.Tensor(downsampled_colors, dtype=o3d.core.Dtype.Float32)  # Colores RGB normalizados (Nx3)
-    downsampled_point_cloud.point.labels = o3d.core.Tensor(semantic_tags.reshape(-1,1), dtype=o3d.core.Dtype.Int32)  # Etiquetas semánticas
+    #downsampled_point_cloud.point.colors = o3d.core.Tensor(downsampled_colors, dtype=o3d.core.Dtype.Float32)  # Colores RGB normalizados (Nx3)
+    #downsampled_point_cloud.point.labels = o3d.core.Tensor(semantic_tags.reshape(-1,1), dtype=o3d.core.Dtype.Int32)  # Etiquetas semánticas
     downsampled_point_cloud.point.intensities = o3d.core.Tensor(intensities.reshape(-1,1), dtype=o3d.core.Dtype.Float32)  # Intensidades normalizadas (Nx1)
 
 
@@ -414,11 +349,144 @@ def lidar_callback(lidar_data, downsampled_point_cloud, frame,lidar, lidar_range
     # Crear la carpeta de salida si no existe
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
+    if not os.path.exists(output_bin_dir):
+        os.makedirs(output_bin_dir)
 
     if frame % 20 == 0:
         filename = os.path.join(output_dir, f"lidar_points_{frame:04d}.pcd")
         print(f"Guardando archivo {filename}...")
         o3d.t.io.write_point_cloud(filename, downsampled_point_cloud,write_ascii=False)
+
+        filename_bin = os.path.join(output_bin_dir, f"lidar_points_{frame:04d}.bin")
+        
+        points = downsampled_point_cloud.point["positions"].numpy()     # (N,3)
+        intens = downsampled_point_cloud.point["intensities"].numpy()   # (N,1)
+        points_4d = np.hstack([points, intens])                         # (N,4)
+
+        print(f"Guardando archivo {filename_bin}...")
+        points_4d.astype(np.float32).tofile(filename_bin)
+
+################################Segmentación Lidar####################################
+import argparse
+import json
+
+import detectionmetrics.utils.lidar as ul
+from mmdet3d.datasets.transforms import (
+    LoadPointsFromFile,
+    LoadAnnotations3D,
+    Pack3DDetInputs,
+)
+from mmengine.registry import FUNCTIONS
+import numpy as np
+import open3d as o3d
+import torch
+from torchvision.transforms import Compose
+
+COLLATE_FN = FUNCTIONS.get("pseudo_collate")
+np.random.seed(42)
+
+
+def get_sample(points: np.ndarray, has_intensity=True):
+
+
+
+    #points = sample["points"]
+    n_feats = 4 if has_intensity else 3
+
+    assert points.shape[1] >= n_feats, \
+        f"Esperaba al menos {n_feats} features, tengo {points.shape[1]}"
+
+    # Recortamos a las dimensiones que quiera el modelo (x,y,z / x,y,z,intensidad)
+    points = points[:, : n_feats].astype(np.float32)
+
+    sample = {
+        "points": torch.from_numpy(points).float(), # Convertir a tensor
+        "pts_semantic_mask_path": None,
+        "sample_id": None,
+        "sample_idx": None,
+        "num_pts_feats": n_feats,
+        "lidar_path": None,
+    }
+
+    # Lista de transforms (sin LoadPointsFromFile, porque ya tenemos el array)
+    transforms = []
+    # Esto es lo que Pack3DDetInputs espera: sample["points"]
+
+
+    if sample["pts_semantic_mask_path"] is not None:
+        transforms.append(
+            LoadAnnotations3D(
+                with_bbox_3d=False,
+                with_label_3d=False,
+                with_seg_3d=True,
+                seg_3d_dtype="np.uint32",
+                seg_offset=65536,
+                dataset_type="semantickitti",
+            )
+        )
+    transforms.append(
+        Pack3DDetInputs(
+            keys=["points", "pts_semantic_mask"],
+            meta_keys=["sample_idx", "lidar_path", "num_pts_feats", "sample_id"],
+        )
+    )
+
+    pipeline = Compose(transforms)
+    sample = pipeline(sample)
+
+    return sample
+
+
+def get_lut(ontology):
+    max_idx = max(class_data["idx"] for class_data in ontology.values())
+    lut = np.zeros((max_idx + 1, 3), dtype=np.uint8)
+    for class_data in ontology.values():
+        lut[class_data["idx"]] = class_data["rgb"]
+    return lut
+
+def inference(
+    model,
+    points: np.ndarray,
+    has_intensity: bool = False,
+    ontology: dict | None = None,
+    device: str = "cuda",
+):
+    """
+    points: np.array (N,4) o (N,3)
+    """
+    # 1) Preparamos sample como antes, pero desde el array
+    sample = get_sample(points, has_intensity)
+    sample = COLLATE_FN([sample])
+    sample = model.data_preprocessor(sample, training=False)
+    inputs, data_samples = sample["inputs"], sample["data_samples"]
+
+    # 2) Inferencia
+    output = model(inputs, data_samples, mode="predict")[0]
+    pred = output.pred_pts_seg.pts_semantic_mask.squeeze().cpu().numpy()  # (N,)
+
+    # 3) Ontología / colores
+    unique_labels = np.unique(pred)
+    if ontology is None:
+        ontology = {
+            str(int(label)): {
+                "idx": int(label),
+                "rgb": np.random.randint(0, 256, size=3).tolist(),
+            }
+            for label in unique_labels
+        }
+
+    lut = get_lut(ontology)
+    colors = lut[pred] / 255.0  # (N,3) en [0,1]
+
+    return pred, colors, ontology
+
+def load_segmentation_model_lidar(model_path: str, device: str | None = None):
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = torch.load(model_path, map_location=device)
+    return model.to(device).eval()
+######################################################################################
+
 
 # Función para crear y configurar el vehículo con sensores
 def spawn_vehicle_lidar_camera_segmentation(world, bp, traffic_manager, delta):
@@ -428,11 +496,10 @@ def spawn_vehicle_lidar_camera_segmentation(world, bp, traffic_manager, delta):
     vehicle = world.spawn_actor(vehicle_bp, spawn_point)
 
     # 📌 LiDAR SEMÁNTICO (Densidad completa)
-    lidar_bp = bp.find('sensor.lidar.ray_cast_semantic')
+    lidar_bp = bp.find('sensor.lidar.ray_cast')
     lidar_bp.set_attribute('channels', '64')
     lidar_bp.set_attribute('range', '100')
     lidar_bp.set_attribute('points_per_second', '1000000')
-    # lidar_bp.set_attribute('rotation_frequency', str(1 / delta))
     lidar_bp.set_attribute('rotation_frequency', str(1 / delta))
     lidar_bp.set_attribute('upper_fov', '30')  # Incrementar el límite superior
     lidar_bp.set_attribute('lower_fov', '-30')  # Reducir el límite inferior
@@ -519,6 +586,7 @@ COMMON_ONTOLOGY_ORIGINAL = {
     "sky": {"idx": 7, "rgb": [128, 128, 255]},
 }
 
+##########################Segmentación visualización##########################
 with open("/home/yuriy/Universidad/2024-tfg-yuriy-moreno/scripts/dataset/pinar_train/ontology.json", "r") as f:
     COMMON_ONTOLOGY = json.load(f)
     
@@ -641,7 +709,7 @@ def segmentation_callback(image, display_surface, frame):
     # Crear la superficie de Pygame y mostrarla en la sección inferior de la pantalla
     display_surface.blit(surface, (0, 0))
 
-
+####################################################################################
 
 # Control del vehículo manual o automático
 def vehicle_control(vehicle, max_speed_mps = 10):
@@ -725,14 +793,14 @@ def main():
     width, height = 800, 600 # Aumentamos el tamaño vertical para RGB y segmentación
 
     # Crear la ventana principal de Pygame y dos subventanas como superficies
-    screen = pygame.display.set_mode((width * 2, height))  # Doble ancho para mostrar ambas vistas en paralelo
-    pygame.display.set_caption("CARLA - RGB y Segmentación")
+    screen = pygame.display.set_mode((width, height))  # Doble ancho para mostrar ambas vistas en paralelo
+    pygame.display.set_caption("CARLA - RGB")
 
     #screen = pygame.display.set_mode((width, height), pygame.SRCALPHA)
     #pygame.display.set_caption("CARLA Vehículo Control")
 
     rgb_surface = pygame.Surface((width, height))          # Subventana para la cámara RGB
-    segmentation_surface = pygame.Surface((width, height)) # Subventana para la segmentación
+    #segmentation_surface = pygame.Surface((width, height)) # Subventana para la segmentación
 
     client = carla.Client('localhost', 2000)
     client.set_timeout(10.0)
@@ -775,16 +843,19 @@ def main():
     global actor_list, third_person_view
     vehicle, lidar, camera = spawn_vehicle_lidar_camera_segmentation(world, blueprint_library, traffic_manager, delta)
 
-    ########################333
+    ########################Segmentación neuronal########################
     print("Cargando modelo de segmentación neuronal...")
     global segmentation_model
-    segmentation_model = load_segmentation_model(
+    #segmentation_model = load_segmentation_model(
         #"/home/yuriy/Downloads/segformer_mit_b2_8xb1.pt"
         #"/home/yuriy/Universidad/2024-tfg-yuriy-moreno/models/prueba-epoch=epoch=98-step=step=1089-val_miou=val_miou=0.14.pt"
-        "/home/yuriy/Universidad/2024-tfg-yuriy-moreno/models/pruebaGrande-epoch=epoch=43-step=step=10032-val_miou=val_miou=0.12.pt"
-    )   
-    ############################
-
+    #    "/home/yuriy/Universidad/2024-tfg-yuriy-moreno/models/pruebaGrande-epoch=epoch=43-step=step=10032-val_miou=val_miou=0.12.pt"
+    #)   
+    ####################################################################
+    ########################Segmentación lidar########################
+    lidar_seg_model = load_segmentation_model_lidar("/home/yuriy/Repositorios/proyecto-GAIA/Perception/scripts/lidar/Example/rellis_20-minkunet-epoch=17-step=70200-val_miou=0.37.pt")
+    ####################################################################
+    
     # Obtener atributos del LiDAR
     attrs = lidar.attributes  # diccionario de strings
     lidar_range    = float(attrs['range'])
@@ -799,19 +870,23 @@ def main():
     #actor_list.append(lidar_low_3)
     actor_list.append(camera)
 
+    frame = 0 # Contador de frames
+
     # Llamada al callback de cámara RGB
     camera.listen(lambda image: camera_callback(image, rgb_surface, frame))
 
     # Llamada al callback de segmentación
-    def process_segmentation():
-        segmentation_callback(None, segmentation_surface, frame)
+    #def process_segmentation():
+    #    segmentation_callback(None, segmentation_surface, frame)
 
     
     
     downsampled_point_cloud = o3d.t.geometry.PointCloud()  # Nube submuestreada
-    downsampled_point_cloud_legacy = o3d.geometry.PointCloud()  # Legacy solo para visualización
+    
+    original = o3d.geometry.PointCloud()
+    segmented = o3d.geometry.PointCloud()  # Legacy solo para visualización
 
-    frame = 0 # Contador de frames
+
 
     lidar.listen(lambda data: lidar_callback(data, 
             downsampled_point_cloud, 
@@ -827,14 +902,15 @@ def main():
     # Utilizar VisualizerWithKeyCallback
  # Crear dos visualizadores SEPARADOS
  
-    viz_downsampled = o3d.visualization.Visualizer() # Puntos después del submuestreo
-
+    viz_original = o3d.visualization.Visualizer() # Puntos después del submuestreo
+    viz_segmented = o3d.visualization.Visualizer()
     
 
-    viz_downsampled.create_window(window_name="Lidar Con Submuestreo", width=960, height=540, left=1100, top=100)
+    viz_original.create_window(window_name="Lidar Original", width=960, height=540, left=1100, top=100)
+    viz_segmented.create_window(window_name="Lidar Segmentado", width=960, height=540, left=1100, top=100)
 
     
-    for viz in [viz_downsampled]:
+    for viz in [viz_original, viz_segmented]:
         viz.get_render_option().background_color = [0.05, 0.05, 0.05]
         viz.get_render_option().point_size = 0.7
         viz.get_render_option().show_coordinate_frame = True
@@ -848,7 +924,8 @@ def main():
     def toggle_camera_view(_):
         global third_person_view
         third_person_view = not third_person_view
-        set_camera_view(viz_downsampled, third_person_view)
+        set_camera_view(viz_original, third_person_view)
+        set_camera_view(viz_segmented, third_person_view)
         print("Cambiando a tercera persona" if third_person_view else "Cambiando a primera persona")
         return True  # Devolver True para continuar el evento de renderizado
 
@@ -864,7 +941,7 @@ def main():
 
         world.tick()  # Asegurar sincronización
 
-        process_segmentation()
+        #process_segmentation()
         vehicle_control(vehicle)
 
         # 📌 Calcular y mostrar velocidad
@@ -876,7 +953,7 @@ def main():
 
         # Dibujar ambas subventanas en la ventana principal
         screen.blit(rgb_surface, (0, 0))                    # Poner RGB a la izquierda
-        screen.blit(segmentation_surface, (width, 0))       # Poner Segmentación a la derecha
+        #screen.blit(segmentation_surface, (width, 0))       # Poner Segmentación a la derecha
         pygame.display.flip()
 
         pygame.event.pump()  # Procesar eventos Pygame
@@ -886,48 +963,60 @@ def main():
 
         if frame == 5 and not lidar_data_received:
   
-            viz_downsampled.add_geometry(downsampled_point_cloud_legacy) 
+            viz_segmented.add_geometry(segmented)
+            viz_original.add_geometry(original) 
             ########
 
             #viz_downsampled.add_geometry(downsampled_point_cloud)# Nube con submuestreo
             lidar_data_received = True
             print("Geometry added to the visualizer")
-            set_camera_view(viz_downsampled, third_person_view)
-
-
-
-        #pcd_legacy.points = o3d.utility.Vector3dVector(np.asarray(downsampled_point_cloud.point["positions"]))
-        #downsampled_point_cloud_legacy.points = o3d.utility.Vector3dVector(downsampled_point_cloud.point["positions"].numpy())
-
-        # Opcional: colores si tienes etiquetas
-        # colors = np.array([get_color_from_semantic(int(t)) for t in downsampled_point_cloud.point["labels"].numpy().flatten()]) / 255.0
-        # downsampled_point_cloud_legacy.colors = o3d.utility.Vector3dVector(colors)
+            set_camera_view(viz_original, third_person_view)
+            set_camera_view(viz_segmented, third_person_view)
 
         ################################333
         try:
-            labels = downsampled_point_cloud.point["labels"].numpy().flatten()
+            #labels = downsampled_point_cloud.point["labels"].numpy().flatten()
             positions = downsampled_point_cloud.point["positions"].numpy()
+            intensities = downsampled_point_cloud.point["intensities"].numpy()  # (N,1)
         except RuntimeError:
             print("⚠️ Frame descartado por conflicto de acceso.")
             continue
-
-        if labels.shape[0] == positions.shape[0]:
-            colors = np.array([get_color_from_semantic(int(t)) for t in labels]) / 255.0
-            downsampled_point_cloud_legacy.points = o3d.utility.Vector3dVector(positions)
-            downsampled_point_cloud_legacy.colors = o3d.utility.Vector3dVector(colors)
-        else:
-            print(f"❌ Mismatch de etiquetas/puntos: {labels.shape[0]} vs {positions.shape[0]}")
+        ###############Segmentación Lidar####################
+        if positions.shape[0] == 0:
+            frame += 1
             continue
+        points_4d = np.hstack([positions, intensities])  # (N,4)
 
+        pred_labels, seg_colors, _ = inference(
+            lidar_seg_model,
+            points_4d,
+            has_intensity=False,
+            ontology=COMMON_ONTOLOGY,  # o pasa tu ontología fija si la tienes
+        )
+        ############################################################
+
+
+
+        segmented.points = o3d.utility.Vector3dVector(positions)
+        segmented.colors = o3d.utility.Vector3dVector(seg_colors)
+
+        original.points = o3d.utility.Vector3dVector(positions)
+        
+        # Normalizar intensidades a [0,1]
+        int_flat = intensities.reshape(-1)
+        int_norm = (int_flat - int_flat.min()) / (int_flat.ptp() + 1e-6)
+        orig_colors = np.stack([int_norm, int_norm, int_norm], axis=1)  # (N,3)
+
+        original.colors = o3d.utility.Vector3dVector(orig_colors)
 
         #########################################
         #viz_downsampled.update_geometry(downsampled_point_cloud)
-        viz_downsampled.update_geometry(downsampled_point_cloud_legacy)
+        viz_segmented.update_geometry(segmented)
+        viz_original.update_geometry(original)
+        #viz_downsampled.poll_events()
 
-        viz_downsampled.poll_events()
 
-
-        viz_downsampled.update_renderer()
+        #viz_downsampled.update_renderer()
 
         # time.sleep(0.03)
         #world.tick()
@@ -941,10 +1030,11 @@ def main():
         #dt0 = datetime.now()
         frame += 1
 
-        if not viz_downsampled.poll_events():
+        if not viz_segmented.poll_events() or not viz_original.poll_events():
             print("Exiting visualization")
             break
-
+        viz_segmented.update_renderer()
+        viz_original.update_renderer
     cleanup()
 
 def cleanup():

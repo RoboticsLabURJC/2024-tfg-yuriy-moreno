@@ -487,7 +487,7 @@ def camera_callback(image, display_surface, frame):
     array = array[:, :, :3]  # Quitar el canal alfa
 
     # Guardar la imagen como PNG
-    if frame % 20 == 0:
+    if frame % 5 == 0:
         filename = os.path.join(output_dir, f"rgb_{frame:04d}.png")
         print(f"Guardando imagen RGB en {filename}")
         #image_to_save = array[:, :, ::-1]  # Convertir de BGRA a RGB
@@ -562,7 +562,7 @@ def segmentation_callback(image, display_surface, frame):
 
     ####### Control PID ########
     # Guardar la imagen como PNG
-    if frame % 20 == 0:
+    if frame % 5 == 0:
         filename = os.path.join(output_dir, f"segmentation_{frame:04d}.png")
         raw_filename = os.path.join(output_raw_dir, f"segmentation_idx_{frame:04d}.png")
 
@@ -665,7 +665,7 @@ def main():
     pygame.init()
     # Configurar Pygame sin usar OpenGL explícitamente
     pygame.display.gl_set_attribute(pygame.GL_ACCELERATED_VISUAL, 0)
-    width, height = 800, 600 # Aumentamos el tamaño vertical para RGB y segmentación
+    width, height = 832, 608 # Aumentamos el tamaño vertical para RGB y segmentación
 
     # Crear la ventana principal de Pygame y dos subventanas como superficies
     screen = pygame.display.set_mode((width * 2, height))  # Doble ancho para mostrar ambas vistas en paralelo
